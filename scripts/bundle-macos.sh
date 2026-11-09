@@ -66,4 +66,27 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
+# Gatekeeper reports unsigned downloaded bundles as "damaged". Without SIGN_IDENTITY the bundle is ad-hoc signed,
+# which only runs on other Macs via System Settings > Privacy & Security > Open Anyway.
+# For warning-free distribution set SIGN_IDENTITY="Developer ID Application: ..." and NOTARY_PROFILE to a profile
+# created with `xcrun notarytool store-credentials`.
+IDENTITY="${SIGN_IDENTITY:--}"
+TIMESTAMP=""
+[ "$IDENTITY" != "-" ] && TIMESTAMP="--timestamp"
+codesign --force --options runtime $TIMESTAMP --sign "$IDENTITY" "$APP/Contents/Resources/ffprobe"
+codesign --force --options runtime $TIMESTAMP --sign "$IDENTITY" "$APP"
+codesign --verify --strict "$APP"
+
+ZIP="$ROOT/target/$PROFILE/$NAME-$VERSION.zip"
+rm -f "$ZIP"
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+    [ "$IDENTITY" = "-" ] && { echo "NOTARY_PROFILE requires SIGN_IDENTITY" >&2; exit 1; }
+    ditto -c -k --keepParent "$APP" "$ZIP"
+    xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"
+    rm "$ZIP"
+fi
+ditto -c -k --keepParent "$APP" "$ZIP"
+
 echo "$APP"
+echo "$ZIP"

@@ -10,9 +10,10 @@ pub mod probe;
 pub mod scan;
 pub mod sync;
 pub mod time;
+pub mod waveform;
 pub mod xmeml;
 
-pub use build::{build, build_xml, BuildOptions, BuildReport};
+pub use build::{build, build_xml, BuildOptions, BuildReport, XmlPrimary};
 pub use media::{MediaFile, MediaKind, Slate};
 pub use prproj::{BinInfo, Project};
-pub use sync::{plan, SyncPlan};
+pub use sync::{plan, SyncMethod, SyncOptions, SyncPlan};

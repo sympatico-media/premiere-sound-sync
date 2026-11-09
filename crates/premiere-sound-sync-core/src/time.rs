@@ -1,5 +1,7 @@
 //! Premiere time units and timecode math.
 
+use std::time::SystemTime;
+
 /// Premiere stores all times as ticks: 254,016,000,000 per second.
 pub const TICKS_PER_SECOND: i64 = 254_016_000_000;
 
@@ -85,6 +87,57 @@ pub fn is_drop_frame(tc: &str) -> bool {
     tc.contains(';') || tc.contains(',')
 }
 
+/// `t`'s calendar date in UTC, as `YYYY-MM-DD`. Used to bucket files into shoot days; a file's
+/// filesystem modification time is a reasonable stand-in for its recording date on camera
+/// originals that haven't been copied through something that rewrites timestamps.
+pub fn ymd_utc(t: SystemTime) -> Option<String> {
+    let days = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64 / 86_400;
+    let (y, m, d) = civil_from_days(days);
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+/// Builds a UTC [`SystemTime`] from a calendar date and time of day, e.g. parsed out of
+/// ffprobe's `creation_time` tag or a BWF file's bext `OriginationDate`/`OriginationTime`.
+/// Treated as UTC regardless of where the recorder's clock was actually set; for day-bucketing
+/// shoot footage that's close enough, and it keeps this dependency-free.
+pub fn system_time_from_ymd_hms(y: i64, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> Option<SystemTime> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    let days = days_from_civil(y, m, d);
+    let secs = days * 86_400 + hh as i64 * 3600 + mm as i64 * 60 + ss as i64;
+    if secs >= 0 {
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64))
+    } else {
+        std::time::UNIX_EPOCH.checked_sub(std::time::Duration::from_secs((-secs) as u64))
+    }
+}
+
+/// (year, month, day) to days-since-epoch, the inverse of [`civil_from_days`] (same source).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 }; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d as u32 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as u64; // [0, 146096]
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// Days-since-epoch to (year, month, day), Howard Hinnant's public-domain algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +160,20 @@ mod tests {
         let rate = Rate::new(30000, 1001);
         assert_eq!(timecode_to_frames("00:01:00;02", rate), Some(1800));
         assert_eq!(timecode_to_frames("00:10:00;00", rate), Some(17982));
+    }
+
+    #[test]
+    fn ymd_matches_known_dates() {
+        assert_eq!(ymd_utc(std::time::UNIX_EPOCH), Some("1970-01-01".to_string()));
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_757_462_400); // 2025-09-10 UTC
+        assert_eq!(ymd_utc(t), Some("2025-09-10".to_string()));
+    }
+
+    #[test]
+    fn system_time_from_ymd_hms_round_trips_through_ymd_utc() {
+        let t = system_time_from_ymd_hms(2025, 9, 10, 14, 23, 1).unwrap();
+        assert_eq!(ymd_utc(t), Some("2025-09-10".to_string()));
+        assert_eq!(system_time_from_ymd_hms(1970, 1, 1, 0, 0, 0), Some(std::time::UNIX_EPOCH));
+        assert_eq!(system_time_from_ymd_hms(2025, 13, 1, 0, 0, 0), None);
     }
 }

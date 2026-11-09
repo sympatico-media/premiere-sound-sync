@@ -1,90 +1,61 @@
 //! Final Cut Pro 7 XML (`xmeml`) export, the interchange format Premiere and Resolve both import.
 //!
-//! The output is one timeline of every synced clip, end to end in shoot order: video on V1 and
-//! each production audio channel on its own track. Source files are listed once as master clips.
-//! Times are whole frames at the timeline rate, so audio is placed to the nearest frame.
+//! Unlike `.prproj`, this is a plain, long-documented text format: there's no binary object
+//! graph to guess at, so it's where every clip-layout idea lives, including ones (like
+//! multicam-ready per-take sequences) that would be too risky to hand-author as Premiere's own
+//! project format. A document holds one or more `<sequence>`s, each a run of takes laid end to
+//! end: every camera angle on its own video track, each production audio channel on its own
+//! audio track. Source files are listed once as master clips. Times are whole frames at the
+//! timeline rate, so audio is placed to the nearest frame.
 
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
 
-use crate::build::{ItemKind, PlannedItem, DEFAULT_RATE};
+use crate::build::DEFAULT_RATE;
 use crate::media::{MediaFile, MediaKind};
 use crate::prproj::objects::escape;
 use crate::time::Rate;
 
 pub const SOURCE_BIN: &str = "Source Media";
 
-/// Builds the XML document: a timeline named `name` plus a bin of the source master clips.
-pub fn export(files: &[MediaFile], items: &[PlannedItem], name: &str, trim: bool) -> String {
-    let mut pairs: Vec<Pair> = items
-        .iter()
-        .filter_map(|item| match item.kind {
-            ItemKind::Merged { video, audio } => Some(Pair::new(&item.name, &files[video], &files[audio], trim)),
-            ItemKind::Plain(_) => None,
-        })
-        .collect();
-    pairs.sort_by_key(|p| (p.zero, p.name.clone()));
-    let rate = pairs.first().map(|p| p.rate).unwrap_or(DEFAULT_RATE);
+/// One take: its camera angle(s) and the production audio they're synced to, placed at each
+/// file's position on the shared sync timeline (see [`crate::sync::SyncPlan`]).
+pub struct Take<'a> {
+    pub name: String,
+    pub videos: Vec<&'a MediaFile>,
+    pub video_positions: Vec<i64>,
+    pub audio: &'a MediaFile,
+    pub audio_position: i64,
+}
+
+/// Builds the XML document: `sequences` names each `<sequence>` and which takes (indices into
+/// `takes`) it contains, in order.
+pub fn export(takes: &[Take], sequences: &[(String, Vec<usize>)], trim: bool) -> String {
+    let rate = takes.first().and_then(|t| t.videos.first().and_then(|v| v.rate)).unwrap_or(DEFAULT_RATE);
 
     let mut ids = Ids::default();
     let mut masters = String::new();
-    for p in &pairs {
-        for f in [p.video, p.audio] {
+    for t in takes {
+        for f in t.videos.iter().copied().chain(std::iter::once(t.audio)) {
             if !ids.files.contains_key(&f.path) {
                 masters.push_str(&master_clip(&mut ids, f, rate));
             }
         }
     }
 
+    let doc_name = sequences.first().map(|(n, _)| n.as_str()).unwrap_or("Synced");
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xmeml>\n<xmeml version=\"4\">\n<project>\n");
-    let _ = writeln!(out, "<name>{}</name>\n<children>", escape(name));
+    let _ = writeln!(out, "<name>{}</name>\n<children>", escape(doc_name));
     if !masters.is_empty() {
         let _ = writeln!(out, "<bin>\n<name>{SOURCE_BIN}</name>\n<children>\n{masters}</children>\n</bin>");
     }
-    out.push_str(&timeline(&mut ids, name, rate, &pairs));
+    for (name, members) in sequences {
+        let group: Vec<&Take> = members.iter().map(|&i| &takes[i]).collect();
+        out.push_str(&timeline(&mut ids, name, rate, &group, trim));
+    }
     out.push_str("</children>\n</project>\n</xmeml>\n");
     out
-}
-
-/// A synced video and audio file, in absolute frames at the video rate.
-struct Pair<'a> {
-    name: String,
-    video: &'a MediaFile,
-    audio: &'a MediaFile,
-    rate: Rate,
-    zero: i64,
-    end: i64,
-    video_span: (i64, i64),
-    audio_span: (i64, i64),
-}
-
-impl<'a> Pair<'a> {
-    fn new(name: &str, video: &'a MediaFile, audio: &'a MediaFile, trim: bool) -> Self {
-        let rate = video.rate.unwrap_or(DEFAULT_RATE);
-        let v0 = round_frames(video.start.unwrap_or(0), rate);
-        let a0 = round_frames(audio.start.unwrap_or(0), rate);
-        let (v1, a1) = (v0 + frames(video.duration, rate), a0 + frames(audio.duration, rate));
-        let (zero, end) = if trim && v0.max(a0) < v1.min(a1) {
-            (v0.max(a0), v1.min(a1))
-        } else {
-            (v0.min(a0), v1.max(a1))
-        };
-        Pair {
-            name: name.to_string(),
-            video,
-            audio,
-            rate,
-            zero,
-            end,
-            video_span: (v0, v1),
-            audio_span: (a0, a1),
-        }
-    }
-
-    fn channels(&self) -> u32 {
-        self.audio.audio_channels.max(1)
-    }
 }
 
 #[derive(Default)]
@@ -201,8 +172,10 @@ struct Item<'a> {
     start: i64,
     end: i64,
     in_: i64,
-    /// Track number (1-based) and position on that track (1-based), for links.
+    /// Track number (1-based): the camera angle index for video, the audio channel for audio.
+    /// Also the index into the per-media-type track array, so track N holds `track - 1`.
     track: usize,
+    /// Position on that track (1-based), for links.
     index: usize,
 }
 
@@ -293,50 +266,106 @@ fn master_clip(ids: &mut Ids, f: &MediaFile, rate: Rate) -> String {
     x
 }
 
-/// The timeline: pairs end to end, each pair's clipitems linked together.
-fn timeline(ids: &mut Ids, name: &str, rate: Rate, pairs: &[Pair]) -> String {
-    let audio_tracks = pairs.iter().map(Pair::channels).max().unwrap_or(1) as usize;
-    let mut video: Vec<String> = Vec::new();
+/// The span (in frames, at `rate`) a take occupies: the outer edge of trimmed or untrimmed
+/// video/audio, whichever `trim` asks for.
+struct Span {
+    zero: i64,
+    end: i64,
+    video_spans: Vec<(i64, i64)>,
+    audio_span: (i64, i64),
+}
+
+fn span(take: &Take, rate: Rate, trim: bool) -> Span {
+    let video_spans: Vec<(i64, i64)> = take
+        .videos
+        .iter()
+        .zip(&take.video_positions)
+        .map(|(v, &p)| {
+            let s = round_frames(p, rate);
+            (s, s + frames(v.duration, rate))
+        })
+        .collect();
+    let a0 = round_frames(take.audio_position, rate);
+    let audio_span = (a0, a0 + frames(take.audio.duration, rate));
+    let starts = video_spans.iter().map(|&(s, _)| s).chain(std::iter::once(audio_span.0));
+    let ends = video_spans.iter().map(|&(_, e)| e).chain(std::iter::once(audio_span.1));
+    let (lo, hi) = (starts.clone().max().unwrap(), ends.clone().min().unwrap());
+    let (zero, end) = if trim && lo < hi {
+        (lo, hi)
+    } else {
+        (starts.min().unwrap(), ends.max().unwrap())
+    };
+    Span { zero, end, video_spans, audio_span }
+}
+
+/// A sequence: the given takes laid end to end, each one's angles and audio channels on their
+/// own tracks (tracks are shared across takes, so angle 1 of every take lands on V1).
+fn timeline(ids: &mut Ids, name: &str, rate: Rate, takes: &[&Take], trim: bool) -> String {
+    let video_tracks = takes.iter().map(|t| t.videos.len()).max().unwrap_or(1).max(1);
+    let audio_tracks = takes.iter().map(|t| t.audio.audio_channels.max(1) as usize).max().unwrap_or(1);
+    let mut video: Vec<Vec<String>> = vec![Vec::new(); video_tracks];
     let mut audio: Vec<Vec<String>> = vec![Vec::new(); audio_tracks];
-    let mut cursor = 0;
-    for p in pairs {
+    let mut cursor = 0i64;
+    for t in takes {
+        let s = span(t, rate, trim);
         let base = cursor;
-        let place = |id: String, file, channel, (s0, s1): (i64, i64), track: usize, index: usize| Item {
-            id,
-            name: &p.name,
-            file,
-            channel,
-            start: base + s0.max(p.zero) - p.zero,
-            end: base + s1.min(p.end) - p.zero,
-            in_: s0.max(p.zero) - s0,
-            track,
-            index,
-        };
-        let mut items = vec![place(ids.item(), p.video, None, p.video_span, 1, video.len() + 1)];
-        for ch in 0..p.channels() {
+        let mut items = Vec::new();
+        for (vi, &v) in t.videos.iter().enumerate() {
+            let (s0, s1) = s.video_spans[vi];
+            items.push(Item {
+                id: ids.item(),
+                name: &t.name,
+                file: v,
+                channel: None,
+                start: base + s0.max(s.zero) - s.zero,
+                end: base + s1.min(s.end) - s.zero,
+                in_: s0.max(s.zero) - s0,
+                track: vi + 1,
+                index: video[vi].len() + 1,
+            });
+        }
+        for ch in 0..t.audio.audio_channels.max(1) {
             let k = ch as usize;
-            items.push(place(ids.item(), p.audio, Some(ch), p.audio_span, k + 1, audio[k].len() + 1));
+            let (s0, s1) = s.audio_span;
+            items.push(Item {
+                id: ids.item(),
+                name: &t.name,
+                file: t.audio,
+                channel: Some(ch),
+                start: base + s0.max(s.zero) - s.zero,
+                end: base + s1.min(s.end) - s.zero,
+                in_: s0.max(s.zero) - s0,
+                track: k + 1,
+                index: audio[k].len() + 1,
+            });
         }
         let group: Vec<&Item> = items.iter().collect();
         for item in &items {
             let file = format!("<file id=\"{}\"/>", ids.files[&item.file.path].1);
             let xml = item_xml(ids, rate, item, &group, &file);
             match item.channel {
-                None => video.push(xml),
-                Some(ch) => audio[ch as usize].push(xml),
+                None => video[item.track - 1].push(xml),
+                Some(_) => audio[item.track - 1].push(xml),
             }
         }
-        cursor += p.end - p.zero;
+        cursor += s.end - s.zero;
     }
-    let (width, height) = pairs.first().map(|p| (p.video.width.max(1), p.video.height.max(1))).unwrap_or((1920, 1080));
+    let (width, height) = takes
+        .first()
+        .and_then(|t| t.videos.first())
+        .map(|v| (v.width.max(1), v.height.max(1)))
+        .unwrap_or((1920, 1080));
     let mut x = format!(
-        "<sequence id=\"sequence-1\"><name>{}</name><duration>{cursor}</duration>{}{}<media><video><format><samplecharacteristics>{}<width>{width}</width><height>{height}</height></samplecharacteristics></format><track>{}</track></video><audio>",
+        "<sequence id=\"sequence-1\"><name>{}</name><duration>{cursor}</duration>{}{}<media><video><format><samplecharacteristics>{}<width>{width}</width><height>{height}</height></samplecharacteristics></format>",
         escape(name),
         rate_xml(rate),
         timecode_xml(0, rate, false),
         rate_xml(rate),
-        video.concat()
     );
+    for track in &video {
+        let _ = write!(x, "<track>{}</track>", track.concat());
+    }
+    x.push_str("</video><audio>");
     for track in &audio {
         let _ = write!(x, "<track>{}</track>", track.concat());
     }
@@ -367,28 +396,33 @@ mod tests {
             camera: None,
             reel: None,
             slate: Slate::default(),
+            modified: None,
+            recorded_at_source: None,
         }
     }
 
-    fn merged(name: &str, video: usize, audio: usize) -> PlannedItem {
-        PlannedItem {
+    fn take<'a>(name: &str, video: &'a MediaFile, audio: &'a MediaFile) -> Take<'a> {
+        Take {
             name: name.into(),
-            bin: vec![],
-            kind: ItemKind::Merged { video, audio },
+            videos: vec![video],
+            video_positions: vec![video.start.unwrap()],
+            audio,
+            audio_position: audio.start.unwrap(),
         }
     }
 
     #[test]
     fn synced_clips_are_laid_end_to_end_in_shoot_order() {
-        let files = vec![
-            file("/m/A002.mov", MediaKind::Video, 5000, 100, 0),
-            file("/m/Sound Roll/2-002.WAV", MediaKind::Audio, 5000, 100, 2),
-            file("/m/A001.mov", MediaKind::Video, 1000, 200, 0),
-            file("/m/Sound Roll/2-001.WAV", MediaKind::Audio, 990, 230, 2),
-        ];
-        let items = vec![merged("2-002", 0, 1), merged("2-001", 2, 3)];
+        // `export` places takes in the order it's given; it's the caller's job (normally
+        // `build::group_takes`, which sorts by sync position) to hand them over in shoot order.
+        let v1 = file("/m/A001.mov", MediaKind::Video, 1000, 200, 0);
+        let a1 = file("/m/Sound Roll/2-001.WAV", MediaKind::Audio, 990, 230, 2);
+        let v2 = file("/m/A002.mov", MediaKind::Video, 5000, 100, 0);
+        let a2 = file("/m/Sound Roll/2-002.WAV", MediaKind::Audio, 5000, 100, 2);
+        let takes = vec![take("2-001", &v1, &a1), take("2-002", &v2, &a2)];
+        let seqs = vec![("Synced".to_string(), vec![0, 1])];
 
-        let full = export(&files, &items, "Synced", false);
+        let full = export(&takes, &seqs, false);
         assert!(full.contains("file://localhost/m/Sound%20Roll/2-001.WAV"));
         assert_eq!(full.matches("<pathurl>").count(), 4);
         assert_eq!(full.matches("<sequence ").count(), 1);
@@ -397,9 +431,45 @@ mod tests {
         assert!(full.contains("<name>2-001</name><enabled>TRUE</enabled><duration>200</duration><rate><timebase>24</timebase><ntsc>TRUE</ntsc></rate><start>10</start><end>210</end><in>0</in><out>200</out>"));
         assert!(full.contains("<start>230</start><end>330</end><in>0</in><out>100</out>"));
 
-        let trimmed = export(&files, &items, "Synced", true);
+        let trimmed = export(&takes, &seqs, true);
         assert!(trimmed.contains("<name>Synced</name><duration>300</duration>"));
         assert!(trimmed.contains("<start>0</start><end>200</end><in>10</in><out>210</out>"));
+    }
+
+    #[test]
+    fn multiple_sequences_share_one_source_bin() {
+        let v1 = file("/m/A001.mov", MediaKind::Video, 1000, 100, 0);
+        let a1 = file("/m/1-001.WAV", MediaKind::Audio, 1000, 100, 1);
+        let v2 = file("/m/A002.mov", MediaKind::Video, 2000, 100, 0);
+        let a2 = file("/m/1-002.WAV", MediaKind::Audio, 2000, 100, 1);
+        let takes = vec![take("1-001", &v1, &a1), take("1-002", &v2, &a2)];
+        let seqs = vec![
+            ("All".to_string(), vec![0, 1]),
+            ("1-001".to_string(), vec![0]),
+            ("1-002".to_string(), vec![1]),
+        ];
+        let xml = export(&takes, &seqs, false);
+        assert_eq!(xml.matches("<sequence ").count(), 3);
+        assert_eq!(xml.matches("<pathurl>").count(), 4); // each source file described once
+        assert_eq!(xml.matches("<bin>").count(), 1); // one shared Source Media bin
+    }
+
+    #[test]
+    fn multicam_take_stacks_angles_on_separate_video_tracks() {
+        let a = file("/m/A001.mov", MediaKind::Video, 1000, 100, 0);
+        let b = file("/m/B001.mov", MediaKind::Video, 1002, 95, 0);
+        let snd = file("/m/2-001.WAV", MediaKind::Audio, 998, 110, 1);
+        let take = Take {
+            name: "2-001".into(),
+            videos: vec![&a, &b],
+            video_positions: vec![a.start.unwrap(), b.start.unwrap()],
+            audio: &snd,
+            audio_position: snd.start.unwrap(),
+        };
+        let xml = export(&[take], &[("Synced".to_string(), vec![0])], false);
+        assert_eq!(xml.matches("<video><format>").count(), 1); // one sequence
+        assert_eq!(xml.matches("<track>").count(), 6); // 2 video + 1 audio master-clip tracks, + the sequence's 2 video + 1 audio
+        assert_eq!(xml.matches("<link>").count(), 12); // 2 single-item master-clip video links + 3 sequence items, each linked to the other 2 (3*3=9)
     }
 
     #[test]

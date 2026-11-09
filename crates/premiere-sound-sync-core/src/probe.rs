@@ -13,26 +13,39 @@ use crate::naming;
 use crate::scan;
 use crate::time::{self, Rate, TICKS_PER_SECOND};
 
-/// Locates ffprobe. GUI apps on macOS don't inherit the shell PATH, so common install dirs are checked too.
+/// Locates a command-line tool. GUI apps on macOS don't inherit the shell PATH, so common
+/// install dirs are checked too.
+fn find_tool(name: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(name));
+            candidates.push(dir.join("../Resources").join(name));
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&paths).map(|p| p.join(name)));
+    }
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"] {
+        candidates.push(Path::new(dir).join(name));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Locates ffprobe, used to read video (and non-WAV audio) metadata.
 pub fn ffprobe_path() -> Option<PathBuf> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.push(dir.join("ffprobe"));
-                candidates.push(dir.join("../Resources/ffprobe"));
-            }
-        }
-        if let Some(paths) = std::env::var_os("PATH") {
-            candidates.extend(std::env::split_paths(&paths).map(|p| p.join("ffprobe")));
-        }
-        for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"] {
-            candidates.push(Path::new(dir).join("ffprobe"));
-        }
-        candidates.into_iter().find(|p| p.is_file())
-    })
-    .clone()
+    PATH.get_or_init(|| find_tool("ffprobe")).clone()
+}
+
+/// Locates ffmpeg, used to decode audio for waveform sync.
+pub fn ffmpeg_path() -> Option<PathBuf> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| find_tool("ffmpeg")).clone()
+}
+
+fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 pub fn probe(path: &Path) -> Result<MediaFile> {
@@ -71,6 +84,8 @@ fn probe_wav(path: &Path) -> Result<MediaFile> {
         camera: None,
         reel: None,
         slate,
+        modified: modified_time(path),
+        recorded_at_source: info.origination,
     })
 }
 
@@ -152,6 +167,10 @@ pub(crate) fn from_ffprobe_json(path: &Path, kind: MediaKind, json: &Value) -> R
         camera: None,
         reel: None,
         slate: Slate::default(),
+        modified: modified_time(path),
+        recorded_at_source: tag(&format, "creation_time")
+            .or_else(|| video.and_then(|v| tag(v, "creation_time")))
+            .and_then(parse_creation_time),
     };
 
     if let Some(v) = video {
@@ -211,6 +230,21 @@ pub(crate) fn from_ffprobe_json(path: &Path, kind: MediaKind, json: &Value) -> R
     Ok(file)
 }
 
+/// Parses ffprobe's `creation_time` tag, an ISO 8601 timestamp such as
+/// `2025-09-10T14:23:01.000000Z`. Only the UTC form (trailing `Z`) is handled; camera containers
+/// that write a local offset instead are rare enough, and close enough for day-bucketing, to
+/// fall back to the filesystem modification time via [`crate::media::MediaFile::recorded`].
+fn parse_creation_time(s: &str) -> Option<std::time::SystemTime> {
+    let s = s.trim().strip_suffix('Z')?;
+    let (date, time_of_day) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, m, day) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let time_of_day = time_of_day.split('.').next().unwrap_or(time_of_day);
+    let mut t = time_of_day.split(':');
+    let (hh, mm, ss) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?, t.next().unwrap_or("0").parse().ok()?);
+    time::system_time_from_ymd_hms(y, m, day, hh, mm, ss)
+}
+
 fn camera_id(format: &Value, video: &Value, stem: &str) -> Option<String> {
     for key in [
         "com.arri.camera.CameraIndex",
@@ -242,7 +276,7 @@ mod tests {
                 {"codec_type":"audio","channels":5,"sample_rate":"48000"},
                 {"codec_type":"data","tags":{"timecode":"02:57:11:17"}}
               ],
-              "format": {"duration":"61.978583","tags":{"timecode":"02:57:11:17","com.arri.camera.CameraIndex":"A","com.arri.camera.ReelName":"A001C5F0"}}
+              "format": {"duration":"61.978583","tags":{"timecode":"02:57:11:17","com.arri.camera.CameraIndex":"A","com.arri.camera.ReelName":"A001C5F0","creation_time":"2025-09-10T14:23:01.000000Z"}}
             }"#,
         )
         .unwrap();
@@ -252,5 +286,17 @@ mod tests {
         assert_eq!(f.audio_channels, 5);
         assert_eq!(f.camera.as_deref(), Some("A"));
         assert_eq!(f.reel.as_deref(), Some("A001C5F0"));
+        assert_eq!(f.recorded_at_source, time::system_time_from_ymd_hms(2025, 9, 10, 14, 23, 1));
+    }
+
+    #[test]
+    fn parses_creation_time_variants() {
+        assert_eq!(
+            parse_creation_time("2025-09-10T14:23:01.000000Z"),
+            time::system_time_from_ymd_hms(2025, 9, 10, 14, 23, 1)
+        );
+        assert_eq!(parse_creation_time("2025-09-10T14:23:01Z"), time::system_time_from_ymd_hms(2025, 9, 10, 14, 23, 1));
+        assert_eq!(parse_creation_time("2025-09-10T14:23:01+02:00"), None); // non-UTC offsets aren't handled
+        assert_eq!(parse_creation_time(""), None);
     }
 }

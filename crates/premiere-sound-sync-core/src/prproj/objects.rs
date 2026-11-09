@@ -102,7 +102,11 @@ impl Writer {
 pub struct VideoSpec {
     pub path: String,
     pub title: String,
+    /// The file's real media start (its own timecode, or 0). Feeds `media_in` / logging only.
     pub start: i64,
+    /// Where this file sits on the shared sync timeline. Usually equal to `start`, but can
+    /// differ when waveform sync placed the file relative to its matched audio instead.
+    pub position: i64,
     pub duration: i64,
     pub frame: i64,
     pub time_display: u32,
@@ -118,7 +122,11 @@ pub struct VideoSpec {
 pub struct AudioSpec {
     pub path: String,
     pub title: String,
+    /// The file's real media start (its own timecode, or 0). Feeds `media_in` / logging only.
     pub start: i64,
+    /// Where this file sits on the shared sync timeline. Usually equal to `start`, but can
+    /// differ when waveform sync placed the file relative to its matched video instead.
+    pub position: i64,
     pub duration: i64,
     pub sample_tick: i64,
     pub channels: u32,
@@ -249,6 +257,7 @@ fn video_media(w: &mut Writer, v: &VideoSpec) -> (Chain, Vec<Chain>) {
             path: v.path.clone(),
             title: v.title.clone(),
             start: v.start,
+            position: v.position,
             duration: v.duration,
             sample_tick: v.sample_tick,
             channels: v.audio_channels,
@@ -799,9 +808,9 @@ fn sub_clip(w: &mut Writer, clip: u64, master: &str, name: &str, channel_group: 
 /// With `trim`, the clip only covers the frames where both video and audio exist.
 pub fn merged_clip(w: &mut Writer, name: &str, video: &VideoSpec, audio: &AudioSpec, trim: bool) -> String {
     let t = trim
-        .then(|| trimmed_merge_timing(video.start, video.duration, video.frame, audio.start, audio.duration))
+        .then(|| trimmed_merge_timing(video.position, video.duration, video.frame, audio.position, audio.duration))
         .flatten()
-        .unwrap_or_else(|| merge_timing(video.start, video.duration, video.frame, audio.start, audio.duration));
+        .unwrap_or_else(|| merge_timing(video.position, video.duration, video.frame, audio.position, audio.duration));
     let n = audio.channels;
     let stem = std::path::Path::new(&audio.title)
         .file_stem()
@@ -1068,6 +1077,7 @@ mod tests {
             path: "/media/A001C001.mov".into(),
             title: "A001C001.mov".into(),
             start: 255_161 * FRAME,
+            position: 255_161 * FRAME,
             duration: 1486 * FRAME,
             frame: FRAME,
             time_display: 110,
@@ -1080,6 +1090,7 @@ mod tests {
             path: "/media/2-001 & co.WAV".into(),
             title: "2-001 & co.WAV".into(),
             start: 510_820_359 * 5_292_000,
+            position: 510_820_359 * 5_292_000,
             duration: 3_031_978 * 5_292_000,
             sample_tick: 5_292_000,
             channels: 2,
@@ -1098,5 +1109,54 @@ mod tests {
         }
         assert_eq!(all.matches("<MasterClip ObjectUID").count(), 4);
         assert_eq!(all.matches("<AudioClipTrack ObjectUID").count(), 2);
+    }
+
+    #[test]
+    fn position_drives_timing_while_start_still_feeds_media_in() {
+        // A waveform-synced clip: the video's own timecode (`start`) is unreliable or absent, so
+        // its `position` on the sync timeline comes from the matched audio instead and differs
+        // from `start` by a few hundred frames.
+        let video = VideoSpec {
+            path: "/media/A001C001.mov".into(),
+            title: "A001C001.mov".into(),
+            start: 1_000 * FRAME,
+            position: 500 * FRAME,
+            duration: 100 * FRAME,
+            frame: FRAME,
+            time_display: 110,
+            width: 1920,
+            height: 1080,
+            audio_channels: 0,
+            sample_tick: 5_292_000,
+        };
+        let audio = AudioSpec {
+            path: "/media/2-001.WAV".into(),
+            title: "2-001.WAV".into(),
+            start: 2_000 * 5_292_000,
+            position: 500 * FRAME,
+            duration: 200 * FRAME,
+            sample_tick: 5_292_000,
+            channels: 1,
+            channel_names: vec![],
+        };
+
+        // Sanity check: position and start really do disagree about where this clip is timed,
+        // so the assertions below actually distinguish which one `merged_clip` used.
+        let by_position = merge_timing(video.position, video.duration, video.frame, audio.position, audio.duration);
+        let by_start = merge_timing(video.start, video.duration, video.frame, audio.start, audio.duration);
+        assert_ne!(by_position.zero_point, by_start.zero_point);
+
+        let mut w = Writer::new(5000);
+        merged_clip(&mut w, "2-001", &video, &audio, false);
+        let all = w.objects().join("\n");
+
+        // Track timing follows `position`, not `start`.
+        assert!(all.contains(&format!("<MZ.ZeroPoint>{}</MZ.ZeroPoint>", by_position.zero_point)));
+        assert!(!all.contains(&format!("<MZ.ZeroPoint>{}</MZ.ZeroPoint>", by_start.zero_point)));
+
+        // Logging (what Premiere shows as each source's media in/out) still reflects the file's
+        // own real timecode, unaffected by where waveform sync placed it.
+        assert!(all.contains(&format!("<MediaInPoint>{}</MediaInPoint><MediaOutPoint>{}</MediaOutPoint>", video.start, video.start + video.duration)));
+        assert!(all.contains(&format!("<MediaInPoint>{}</MediaInPoint><MediaOutPoint>{}</MediaOutPoint>", audio.start, audio.start + audio.duration)));
     }
 }

@@ -23,6 +23,57 @@ export struct MediaRow {
     partner: string,
 }
 
+// A selectable row with a one-line explanation underneath, used for picking between a few
+// named output styles (radio-button style: only one in a group is ever selected).
+component OptionRow inherits Rectangle {
+    in property <string> text;
+    in property <string> hint;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked();
+    border-radius: Theme.radius-small;
+    background: root.selected ? Theme.selection : touch.has-hover ? #ffffff08 : transparent;
+    VerticalLayout {
+        padding: 6px;
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: 7px;
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                background: root.selected ? (root.enabled ? Theme.accent : #0a84ff66) : #ffffff1a;
+                border-width: root.selected ? 0 : 1px;
+                border-color: #ffffff33;
+                if root.selected: Rectangle {
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 3px;
+                    background: white;
+                }
+            }
+            Label {
+                text: root.text;
+                color: root.enabled ? Theme.text : Theme.text-tertiary;
+                vertical-alignment: center;
+            }
+        }
+        Label {
+            text: root.hint;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-size-small;
+            wrap: word-wrap;
+            preferred-width: 0px;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 component Column inherits Label {
     color: Theme.text-tertiary;
     font-size: Theme.font-size-small;
@@ -121,7 +172,11 @@ export component AppWindow inherits Window {
     in property <[MediaRow]> media;
     in property <bool> scanning;
     in property <float> scan-progress;
+    in property <bool> analyzing;
+    in property <float> analyze-progress;
 
+    in-out property <bool> sync-timecode: true;
+    in-out property <bool> sync-waveform: false;
     in-out property <bool> rename: true;
     in-out property <string> name-template;
     in-out property <bool> scene-bins: true;
@@ -129,6 +184,11 @@ export component AppWindow inherits Window {
     in-out property <bool> multicam: true;
     in-out property <bool> import-unsynced: true;
     in-out property <bool> trim: true;
+
+    // XML timeline layout. 0 = one synced timeline, 1 = one sequence per take.
+    in-out property <int> xml-primary: 0;
+    in-out property <bool> xml-scene-stringouts: false;
+    in-out property <bool> xml-day-sequences: false;
 
     // 0 new project, 1 existing project, 2 XML timeline
     in-out property <int> dest-mode: 0;
@@ -228,9 +288,9 @@ export component AppWindow inherits Window {
                         font-weight: 600;
                     }
                 }
-                if root.scanning: ProgressIndicator {
+                if root.scanning || root.analyzing: ProgressIndicator {
                     height: 3px;
-                    progress: root.scan-progress;
+                    progress: root.scanning ? root.scan-progress : root.analyze-progress;
                 }
                 if root.media.length > 0: HorizontalLayout {
                     height: 24px;
@@ -279,13 +339,13 @@ export component AppWindow inherits Window {
                         alignment: center;
                         spacing: 6px;
                         Label {
-                            text: root.scanning ? "Reading media…" : "No media yet";
+                            text: root.scanning ? "Reading media…" : root.analyzing ? "Analyzing audio…" : "No media yet";
                             color: Theme.text-secondary;
                             font-size: Theme.font-size-large;
                             horizontal-alignment: center;
                         }
                         Label {
-                            text: root.scanning ? "" : "Add a project folder on the left. Video and audio files are matched by timecode.";
+                            text: root.scanning || root.analyzing ? "" : "Add a project folder on the left. Video and audio files are matched by timecode.";
                             color: Theme.text-tertiary;
                             horizontal-alignment: center;
                         }
@@ -298,6 +358,36 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     padding: 14px;
                     spacing: 14px;
+                    GroupBox {
+                        title: "SYNC BY";
+                        horizontal-stretch: 1;
+                        VerticalLayout {
+                            spacing: 8px;
+                            CheckBox {
+                                text: "Timecode";
+                                checked <=> root.sync-timecode;
+                                enabled: !root.sync-timecode || root.sync-waveform;
+                                toggled => {
+                                    root.options-changed();
+                                }
+                            }
+                            CheckBox {
+                                text: "Audio waveform";
+                                checked <=> root.sync-waveform;
+                                enabled: !root.sync-waveform || root.sync-timecode;
+                                toggled => {
+                                    root.options-changed();
+                                }
+                            }
+                            Label {
+                                text: "Waveform matches clips by sound instead of embedded timecode. Slower, but works on footage with none.";
+                                color: Theme.text-tertiary;
+                                font-size: Theme.font-size-small;
+                                wrap: word-wrap;
+                                preferred-width: 0px;
+                            }
+                        }
+                    }
                     GroupBox {
                         title: "CLIP NAMES";
                         horizontal-stretch: 1;
@@ -351,9 +441,23 @@ export component AppWindow inherits Window {
                         }
                     }
                     GroupBox {
-                        title: "ORGANIZE";
+                        title: root.dest-mode == 2 ? "OUTPUT" : "ORGANIZE";
                         horizontal-stretch: 1;
-                        HorizontalLayout {
+                        VerticalLayout {
+                            spacing: 8px;
+                            CheckBox {
+                                text: "Group camera angles that overlap";
+                                checked <=> root.multicam;
+                                toggled => {
+                                    root.options-changed();
+                                }
+                            }
+                            CheckBox {
+                                text: "Trim clips to match";
+                                checked <=> root.trim;
+                            }
+                        }
+                        if root.dest-mode != 2: HorizontalLayout {
                             spacing: 18px;
                             alignment: start;
                             VerticalLayout {
@@ -361,7 +465,6 @@ export component AppWindow inherits Window {
                                 CheckBox {
                                     text: "Bin per scene";
                                     checked <=> root.scene-bins;
-                                    enabled: root.dest-mode != 2;
                                     toggled => {
                                         root.options-changed();
                                     }
@@ -369,7 +472,6 @@ export component AppWindow inherits Window {
                                 CheckBox {
                                     text: "Bin per shot";
                                     checked <=> root.shot-bins;
-                                    enabled: root.dest-mode != 2;
                                     toggled => {
                                         root.options-changed();
                                     }
@@ -378,33 +480,69 @@ export component AppWindow inherits Window {
                             VerticalLayout {
                                 spacing: 8px;
                                 CheckBox {
-                                    text: "Multicam when timecode overlaps";
-                                    checked <=> root.multicam;
-                                    enabled: root.dest-mode != 2;
-                                    toggled => {
-                                        root.options-changed();
-                                    }
-                                }
-                                CheckBox {
                                     text: "Import unsynced files";
                                     checked <=> root.import-unsynced;
-                                    enabled: root.dest-mode != 2;
                                     toggled => {
                                         root.options-changed();
                                     }
-                                }
-                                CheckBox {
-                                    text: "Trim clips to match";
-                                    checked <=> root.trim;
                                 }
                             }
                         }
-                        Label {
-                            text: root.dest-mode == 2 ? "An XML timeline has no bins, multicam or unsynced clips. Trimming removes the gaps between clips." : "Trimming cuts each merged clip down to where picture and sound both exist.";
+                        if root.dest-mode != 2: Label {
+                            text: "Clips are merged: Premiere's single clip combining picture and its matched production audio. Quick to use, but Premiere can't split a merged clip back into its sources, and sound editors lose the audio metadata. For multicam or per-take sequences, export an XML Timeline instead.";
                             color: Theme.text-tertiary;
                             font-size: Theme.font-size-small;
                             wrap: word-wrap;
                             preferred-width: 0px;
+                        }
+                        if root.dest-mode == 2: VerticalLayout {
+                            spacing: 2px;
+                            OptionRow {
+                                text: "One synced timeline";
+                                hint: "Every synced take back to back in shoot order. Good for reviewing sync.";
+                                selected: root.xml-primary == 0;
+                                clicked => {
+                                    root.xml-primary = 0;
+                                    root.options-changed();
+                                }
+                            }
+                            OptionRow {
+                                text: "One sequence per take";
+                                hint: "Each take's camera angles and production audio in their own small sequence, already aligned. Select one in Premiere and choose \"Create Multi-Camera Source Sequence\" to finish the multicam clip.";
+                                selected: root.xml-primary == 1;
+                                clicked => {
+                                    root.xml-primary = 1;
+                                    root.options-changed();
+                                }
+                            }
+                            CheckBox {
+                                text: "Also add scene stringouts";
+                                checked <=> root.xml-scene-stringouts;
+                                toggled => {
+                                    root.options-changed();
+                                }
+                            }
+                            Label {
+                                text: "One extra sequence per scene, with that scene's takes in slate order.";
+                                color: Theme.text-tertiary;
+                                font-size: Theme.font-size-small;
+                                wrap: word-wrap;
+                                preferred-width: 0px;
+                            }
+                            CheckBox {
+                                text: "Also add a sequence per shoot day";
+                                checked <=> root.xml-day-sequences;
+                                toggled => {
+                                    root.options-changed();
+                                }
+                            }
+                            Label {
+                                text: "One extra sequence for each day media was recorded on.";
+                                color: Theme.text-tertiary;
+                                font-size: Theme.font-size-small;
+                                wrap: word-wrap;
+                                preferred-width: 0px;
+                            }
                         }
                     }
                 }
@@ -442,7 +580,7 @@ export component AppWindow inherits Window {
                         alignment: center;
                         PrimaryButton {
                             text: root.dest-mode == 0 ? "Create Project" : root.dest-mode == 1 ? "Add to Project" : "Export XML";
-                            enabled: root.can-build && !root.building && !root.scanning;
+                            enabled: root.can-build && !root.building && !root.scanning && !root.analyzing;
                             clicked => {
                                 root.build();
                             }

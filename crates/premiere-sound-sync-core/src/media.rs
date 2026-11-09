@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::time::Rate;
 
@@ -58,9 +59,24 @@ pub struct MediaFile {
     pub camera: Option<String>,
     pub reel: Option<String>,
     pub slate: Slate,
+    /// Filesystem modification time, used to narrow waveform-sync candidates on large shoots,
+    /// and as the last-resort fallback for [`MediaFile::recorded`].
+    pub modified: Option<SystemTime>,
+    /// When the camera or recorder says this was actually recorded: ffprobe's `creation_time`
+    /// tag, or a BWF file's bext `OriginationDate`/`OriginationTime`. `None` when neither is
+    /// present (not every camera writes one); use [`MediaFile::recorded`] for a value that
+    /// falls back to the filesystem modification time.
+    pub recorded_at_source: Option<SystemTime>,
 }
 
 impl MediaFile {
+    /// The best guess at when this was recorded: the camera/recorder's own timestamp if it
+    /// wrote one, otherwise the file's filesystem modification time (close enough for grouping
+    /// footage by shoot day on media that's gone straight from the card).
+    pub fn recorded(&self) -> Option<SystemTime> {
+        self.recorded_at_source.or(self.modified)
+    }
+
     pub fn file_name(&self) -> String {
         self.path
             .file_name()

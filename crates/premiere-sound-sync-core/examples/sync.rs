@@ -1,20 +1,56 @@
-//! Headless run: `cargo run -p premiere-sound-sync-core --example sync -- OUT.prproj|OUT.xml [--into EXISTING.prproj] SOURCES...`
+//! Headless run: `cargo run -p premiere-sound-sync-core --example sync -- OUT.prproj|OUT.xml [--into EXISTING.prproj] [--xml-primary all|per-take] [--xml-scene-stringouts] [--xml-day-sequences] SOURCES...`
+//!
+//! The `--xml-*` flags only affect `OUT.xml`; a `.prproj` destination always writes merged
+//! clips (see `BuildOptions::xml_primary` for why per-take/multicam sequences are XML-only).
 
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
-use premiere_sound_sync_core::{build, build_xml, plan, probe, scan, BuildOptions, Project};
+use premiere_sound_sync_core::{build, build_xml, plan, probe, scan, BuildOptions, Project, SyncOptions, XmlPrimary};
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        bail!("usage: sync OUT.prproj [--into EXISTING.prproj] SOURCES...");
+        bail!(
+            "usage: sync OUT.prproj|OUT.xml [--into EXISTING.prproj] [--xml-primary all|per-take] \
+             [--xml-scene-stringouts] [--xml-day-sequences] SOURCES..."
+        );
     }
     let out = PathBuf::from(args.remove(0));
     let mut existing = None;
-    if args.first().map(String::as_str) == Some("--into") {
-        args.remove(0);
-        existing = Some(PathBuf::from(args.remove(0)));
+    let mut opts = BuildOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--into" => {
+                args.remove(i);
+                if i >= args.len() {
+                    bail!("--into needs a path");
+                }
+                existing = Some(PathBuf::from(args.remove(i)));
+            }
+            "--xml-primary" => {
+                args.remove(i);
+                if i >= args.len() {
+                    bail!("--xml-primary needs 'all' or 'per-take'");
+                }
+                let value = args.remove(i);
+                opts.xml_primary = match value.as_str() {
+                    "all" => XmlPrimary::All,
+                    "per-take" => XmlPrimary::PerTake,
+                    other => bail!("--xml-primary: unknown value '{other}' (want 'all' or 'per-take')"),
+                };
+            }
+            "--xml-scene-stringouts" => {
+                args.remove(i);
+                opts.xml_scene_stringouts = true;
+            }
+            "--xml-day-sequences" => {
+                args.remove(i);
+                opts.xml_day_sequences = true;
+            }
+            _ => i += 1,
+        }
     }
     let sources: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
     let paths = scan::collect(&sources);
@@ -26,8 +62,8 @@ fn main() -> Result<()> {
             Err(e) => println!("  skip {}: {e}", p.display()),
         }
     }
-    let opts = BuildOptions::default();
-    let sync_plan = plan(&files, opts.multicam);
+    let sync_opts = SyncOptions { multicam: opts.multicam, ..SyncOptions::default() };
+    let sync_plan = plan(&files, &std::collections::HashMap::new(), &sync_opts);
     for m in &sync_plan.merged {
         println!("  {} + {}", files[m.video].file_name(), files[m.audio].file_name());
     }

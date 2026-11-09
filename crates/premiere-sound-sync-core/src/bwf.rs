@@ -3,11 +3,13 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::time::SystemTime;
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 
 use crate::media::Slate;
+use crate::time;
 
 #[derive(Debug, Clone, Default)]
 pub struct WavInfo {
@@ -19,6 +21,9 @@ pub struct WavInfo {
     pub time_reference: Option<u64>,
     pub description: String,
     pub ixml: Option<String>,
+    /// When the recorder says this was actually recorded, from bext `OriginationDate` +
+    /// `OriginationTime`.
+    pub origination: Option<SystemTime>,
 }
 
 impl WavInfo {
@@ -138,6 +143,7 @@ pub fn read_wav(path: &Path) -> Result<WavInfo> {
                     let low = u32::from_le_bytes(buf[338..342].try_into().unwrap()) as u64;
                     let high = u32::from_le_bytes(buf[342..346].try_into().unwrap()) as u64;
                     info.time_reference = Some((high << 32) | low);
+                    info.origination = parse_origination(&latin1(&buf[320..330]), &latin1(&buf[330..338]));
                 }
                 skip_pad(&mut r, size)?;
             }
@@ -180,6 +186,17 @@ fn skip_pad(r: &mut (impl Read + Seek), size: u64) -> Result<()> {
         r.seek(SeekFrom::Current(1))?;
     }
     Ok(())
+}
+
+/// Parses bext's `OriginationDate` (`YYYY-MM-DD`) and `OriginationTime` (`HH:MM:SS`), as found
+/// verbatim in the chunk (some recorders zero-fill them instead of leaving them blank, which
+/// `system_time_from_ymd_hms` rejects as an invalid date and turns into `None` here too).
+fn parse_origination(date: &str, time_of_day: &str) -> Option<SystemTime> {
+    let mut d = date.trim().split('-');
+    let (y, m, day) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let mut t = time_of_day.trim().split(':');
+    let (hh, mm, ss) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?, t.next().unwrap_or("0").parse().ok()?);
+    time::system_time_from_ymd_hms(y, m, day, hh, mm, ss)
 }
 
 fn latin1(bytes: &[u8]) -> String {
@@ -251,6 +268,16 @@ pub(crate) mod tests {
         assert_eq!(slate.shot.as_deref(), Some("A"));
         assert_eq!(slate.take.as_deref(), Some("003"));
         assert!(slate.circled);
+    }
+
+    #[test]
+    fn origination_date_and_time_parse_to_a_utc_instant() {
+        assert_eq!(
+            parse_origination("2025-09-10", "14:23:01"),
+            time::system_time_from_ymd_hms(2025, 9, 10, 14, 23, 1)
+        );
+        assert_eq!(parse_origination("", ""), None);
+        assert_eq!(parse_origination("not-a-date", "14:23:01"), None);
     }
 
     #[test]

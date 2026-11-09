@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/studio-ui", "crates/premiere-sound-sync-core", "apps/premiere-sound-sync"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -19,3 +19,4 @@ walkdir = "2.5"
 flate2 = "1.1"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
+rustfft = "6"

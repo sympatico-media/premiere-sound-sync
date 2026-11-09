@@ -1,6 +1,6 @@
 # Premiere Sync
 
-Premiere Sync pairs production audio with camera video by timecode and builds a Premiere Pro project from the result. Drop in a shoot folder and it finds the media, matches picture to sound, and writes merged clips, scene bins, and multicam sequences.
+Premiere Sync pairs production audio with camera video by timecode (or by waveform, for footage with no timecode) and writes the result as a Premiere Pro project or an XML timeline. Drop in a shoot folder and it finds the media, matches picture to sound, and groups camera angles that overlap into takes.
 
 Clip names inside Premiere can come from slate metadata. Files on disk keep their original names.
 
@@ -12,11 +12,20 @@ Synced clips show up in Premiere named from the slate, grouped into a bin per sc
 
 ## What it writes
 
-- **New project.** A `.prproj` with synced clips in a `Synced` bin.
-- **Existing project.** The same clips added to a bin you choose.
-- **XML timeline.** An interchange timeline for Premiere Pro or DaVinci Resolve. XML has no bins, multicam sequences, or unsynced clips.
+- **New project.** A `.prproj` with merged clips in a `Synced` bin.
+- **Existing project.** The same merged clips added to a bin you choose.
+- **XML timeline.** An interchange timeline (`.xml`, FCP7/`xmeml`) for Premiere Pro or DaVinci Resolve.
 
-Merged clips are trimmed to the stretch where picture and sound both exist. Files that never match can still be imported as plain clips.
+A **merged clip** is Premiere's own clip type that combines one camera angle with its matched production audio. `.prproj` output only ever writes merged clips: it's the one Premiere clip type this project can produce with confidence, because the internal layout of a hand-authored Sequence or multicam clip isn't documented anywhere, even by other projects that reverse-engineer `.prproj` with real copies of Premiere to check their work against. Forging one risked writing a project that opens looking fine and corrupts partway through editing.
+
+Multi-angle takes and ready-to-use sequences are written to the XML timeline instead, which is a plain, fully documented interchange format with no such risk. An XML destination can be laid out as:
+
+- **One synced timeline** – every take back to back in shoot order, for reviewing sync.
+- **One sequence per take** – each take's camera angles and audio in their own small sequence, already aligned. Select one in Premiere and use **Create Multi-Camera Source Sequence** to finish the multicam clip.
+
+Either one can be combined with extra sequences: **scene stringouts** (one sequence per scene, takes in slate order) and/or **a sequence per shoot day** (grouped by the date the camera or recorder actually wrote down, falling back to the file's filesystem modification time if neither device recorded one).
+
+Clips are trimmed to the stretch where picture and sound both exist. Files that never match can still be imported as plain clips (`.prproj` only; an XML timeline only contains synced takes).
 
 ## How matching works
 
@@ -47,7 +56,26 @@ On macOS, this builds a `Premiere Sync.app` bundle:
 scripts/bundle-macos.sh
 ```
 
-Pass `debug` to bundle the debug build. The app is written to `target/release/Premiere Sync.app`. The script downloads a static arm64 `ffprobe` from [martin-riedl.de](https://ffmpeg.martin-riedl.de), checks its SHA-256, and puts it in `Contents/Resources`. Set `FFPROBE=/path/to/ffprobe` to bundle a different build.
+Pass `debug` to bundle the debug build. The app is written to `target/release/Premiere Sync.app`. The script downloads a static arm64 `ffprobe` from [martin-riedl.de](https://ffmpeg.martin-riedl.de), checks its SHA-256, and puts it in `Contents/Resources`. Set `FFPROBE=/path/to/ffprobe` to bundle a different build. A zip for uploading to Releases is written next to the app.
+
+### Signing for release
+
+Without a signing identity the app is ad-hoc signed, and other Macs block it until the user clicks **Open Anyway** in System Settings > Privacy & Security. To ship a build that opens normally, sign it with a Developer ID and notarize it. This needs a paid [Apple Developer Program](https://developer.apple.com/programs/) membership.
+
+1. In Xcode > Settings > Accounts, create a **Developer ID Application** certificate.
+2. Store notarization credentials once, using an [app-specific password](https://account.apple.com):
+
+   ```sh
+   xcrun notarytool store-credentials notary --apple-id you@example.com --team-id TEAMID
+   ```
+
+3. Build, sign, notarize, and staple:
+
+   ```sh
+   SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" NOTARY_PROFILE=notary scripts/bundle-macos.sh
+   ```
+
+Upload `target/release/Premiere Sync-<version>.zip` to Releases.
 
 ## Headless
 
@@ -57,6 +85,16 @@ The core crate can sync without the window. The first argument is the output pat
 cargo run -p premiere-sound-sync-core --example sync -- episode.prproj /path/to/shoot
 cargo run -p premiere-sound-sync-core --example sync -- episode.prproj --into existing.prproj /path/to/shoot
 cargo run -p premiere-sound-sync-core --example sync -- timeline.xml /path/to/shoot
+```
+
+An `.xml` destination takes a few extra flags, all optional:
+
+```sh
+cargo run -p premiere-sound-sync-core --example sync -- timeline.xml \
+  --xml-primary per-take \        # all (default) | per-take
+  --xml-scene-stringouts \
+  --xml-day-sequences \
+  /path/to/shoot
 ```
 
 ## Layout

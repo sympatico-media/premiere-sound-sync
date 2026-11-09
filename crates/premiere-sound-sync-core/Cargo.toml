@@ -13,3 +13,4 @@ walkdir.workspace = true
 flate2.workspace = true
 uuid.workspace = true
 regex.workspace = true
+rustfft.workspace = true

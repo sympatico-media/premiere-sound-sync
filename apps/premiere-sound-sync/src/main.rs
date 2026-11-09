@@ -9,7 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use premiere_sound_sync_core::time::{Rate, TICKS_PER_SECOND};
-use premiere_sound_sync_core::{build, build_xml, naming, plan, probe, scan, BinInfo, BuildOptions, MediaFile, MediaKind, Project, SyncPlan};
+use premiere_sound_sync_core::{
+    build, build_xml, naming, plan, probe, scan, waveform, BinInfo, BuildOptions, MediaFile, MediaKind, Project, SyncMethod, SyncOptions, SyncPlan,
+    XmlPrimary,
+};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use studio_ui::{dialogs, FileDrop};
 
@@ -26,6 +29,7 @@ struct State {
     output: Option<PathBuf>,
     last_output: Option<PathBuf>,
     icons: HashMap<PathBuf, slint::Image>,
+    fingerprints: HashMap<PathBuf, waveform::Fingerprint>,
 }
 
 thread_local! {
@@ -119,12 +123,7 @@ fn main() -> anyhow::Result<()> {
         let weak = ui.as_weak();
         move || {
             let ui = weak.unwrap();
-            let multicam = ui.get_multicam();
-            with_state(|s| s.plan = plan(&s.files, multicam));
-            refresh_media(&ui);
-            if !ui.get_scanning() && !ui.get_building() {
-                update_scan_status(&ui);
-            }
+            start_analysis(&ui);
         }
     });
 
@@ -326,7 +325,6 @@ fn finish_scan(ui: &AppWindow, generation: u64, paths: Vec<PathBuf>, results: Ve
     if with_state(|s| s.generation) != generation {
         return;
     }
-    let multicam = ui.get_multicam();
     with_state(|s| {
         s.files.clear();
         s.failures.clear();
@@ -336,16 +334,104 @@ fn finish_scan(ui: &AppWindow, generation: u64, paths: Vec<PathBuf>, results: Ve
                 Err(e) => s.failures.push((paths[i].clone(), e)),
             }
         }
-        s.plan = plan(&s.files, multicam);
     });
     ui.set_scanning(false);
     refresh_sources(ui);
+    start_analysis(ui);
+}
+
+fn sync_options(ui: &AppWindow) -> SyncOptions {
+    SyncOptions {
+        timecode: ui.get_sync_timecode(),
+        waveform: ui.get_sync_waveform(),
+        multicam: ui.get_multicam(),
+    }
+}
+
+/// Replans the sync, first fingerprinting any file waveform sync needs that isn't cached yet.
+/// Safe to call any time the files, the sync method checkboxes, or `multicam` change.
+fn start_analysis(ui: &AppWindow) {
+    let opts = sync_options(ui);
+    let generation = with_state(|s| s.generation);
+    if !opts.waveform {
+        with_state(|s| s.plan = plan(&s.files, &s.fingerprints, &opts));
+        ui.set_analyzing(false);
+        finish_planning(ui);
+        return;
+    }
+    let missing: Vec<PathBuf> = with_state(|s| s.files.iter().map(|f| f.path.clone()).filter(|p| !s.fingerprints.contains_key(p)).collect());
+    if missing.is_empty() {
+        with_state(|s| s.plan = plan(&s.files, &s.fingerprints, &opts));
+        ui.set_analyzing(false);
+        finish_planning(ui);
+        return;
+    }
+    ui.set_analyzing(true);
+    ui.set_analyze_progress(0.0);
+    set_status(ui, "Analyzing audio…", 0);
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let total = missing.len();
+        let done = Arc::new(AtomicUsize::new(0));
+        let results: Arc<Mutex<Vec<(PathBuf, Result<waveform::Fingerprint, String>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let next = Arc::new(AtomicUsize::new(0));
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let (missing, done, results, next, weak) = (&missing, done.clone(), results.clone(), next.clone(), weak.clone());
+                scope.spawn(move || loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    if i >= missing.len() {
+                        break;
+                    }
+                    let r = waveform::fingerprint(&missing[i]).map_err(|e| e.to_string());
+                    results.lock().unwrap().push((missing[i].clone(), r));
+                    let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+                    let progress = n as f32 / total.max(1) as f32;
+                    let _ = weak.upgrade_in_event_loop(move |ui| {
+                        if with_state(|s| s.generation) == generation {
+                            ui.set_analyze_progress(progress);
+                            ui.set_status(format!("Analyzing audio… {n} of {total}").into());
+                        }
+                    });
+                });
+            }
+        });
+        let results = Arc::try_unwrap(results).map(|m| m.into_inner().unwrap()).unwrap_or_default();
+        let _ = weak.upgrade_in_event_loop(move |ui| finish_analysis(&ui, generation, results));
+    });
+}
+
+fn finish_analysis(ui: &AppWindow, generation: u64, results: Vec<(PathBuf, Result<waveform::Fingerprint, String>)>) {
+    if with_state(|s| s.generation) != generation {
+        return;
+    }
+    with_state(|s| {
+        for (path, r) in results {
+            // A file that fails to fingerprint (e.g. no audio stream) just can't get a waveform
+            // match; it isn't a scan failure, so it doesn't go in `s.failures`.
+            if let Ok(fp) = r {
+                s.fingerprints.insert(path, fp);
+            }
+        }
+    });
+    let opts = sync_options(ui);
+    with_state(|s| s.plan = plan(&s.files, &s.fingerprints, &opts));
+    ui.set_analyzing(false);
+    finish_planning(ui);
+}
+
+/// Refreshes everything that depends on `State::plan`, once it's up to date.
+fn finish_planning(ui: &AppWindow) {
     refresh_media(ui);
-    update_scan_status(ui);
+    if !ui.get_scanning() && !ui.get_building() && !ui.get_analyzing() {
+        update_scan_status(ui);
+    }
     refresh_destination(ui);
 }
 
 fn update_scan_status(ui: &AppWindow) {
+    let (timecode, waveform) = (ui.get_sync_timecode(), ui.get_sync_waveform());
     let (files, merged, failures, ffprobe_missing, summary) = with_state(|s| {
         (
             s.files.len(),
@@ -355,12 +441,20 @@ fn update_scan_status(ui: &AppWindow) {
             media_summary(s),
         )
     });
+    let ffmpeg_missing = waveform && probe::ffmpeg_path().is_none();
     if ffprobe_missing {
         set_status(ui, "ffprobe wasn't found. Install FFmpeg (brew install ffmpeg) to read video files.", 3);
+    } else if ffmpeg_missing {
+        set_status(ui, "ffmpeg wasn't found. Install FFmpeg (brew install ffmpeg) to sync by waveform.", 3);
     } else if files == 0 {
         set_status(ui, "No audio or video files found in these sources.", 2);
     } else if merged == 0 {
-        set_status(ui, "No video and audio share timecode, so nothing can be synced.", 2);
+        let how = match (timecode, waveform) {
+            (true, true) => "timecode or waveform",
+            (_, true) => "waveform",
+            _ => "timecode",
+        };
+        set_status(ui, &format!("No video matched any audio by {how}, so nothing can be synced."), 2);
     } else if failures > 0 {
         set_status(ui, &format!("{summary}  ·  {failures} unreadable"), 2);
     } else {
@@ -399,6 +493,7 @@ fn duration(ticks: i64) -> String {
 }
 
 fn refresh_media(ui: &AppWindow) {
+    let waveform_sync = ui.get_sync_waveform();
     let rows = with_state(|s| {
         let mut rows = Vec::new();
         let p = &s.plan;
@@ -409,15 +504,18 @@ fn refresh_media(ui: &AppWindow) {
                 _ => String::new(),
             };
             let multicam = p.multicam.iter().find(|g| g.angles.iter().flatten().any(|&v| v == i));
-            let (status, tone, partner) = if f.start.is_none() {
+            let (status, tone, partner) = if f.start.is_none() && !waveform_sync {
                 ("No timecode".to_string(), 3, String::new())
             } else if let Some(group) = multicam {
                 let cam = f.camera.clone().unwrap_or_default();
                 let audio = group.audio.map(|a| s.files[a].file_name()).unwrap_or_default();
                 (format!("Multicam {cam}").trim().to_string(), 2, audio)
             } else if f.kind == MediaKind::Video {
-                match p.audio_for(i) {
-                    Some(a) => ("Synced".into(), 1, s.files[a].file_name()),
+                match p.merged.iter().find(|m| m.video == i) {
+                    Some(m) => {
+                        let how = if matches!(m.method, SyncMethod::Waveform { .. }) { "waveform" } else { "timecode" };
+                        (format!("Synced ({how})"), 1, s.files[m.audio].file_name())
+                    }
                     None => ("No match".into(), 3, String::new()),
                 }
             } else {
@@ -574,6 +672,9 @@ fn start_build(ui: &AppWindow) {
         multicam: ui.get_multicam(),
         trim_to_overlap: ui.get_trim(),
         import_unsynced: ui.get_import_unsynced(),
+        xml_primary: if ui.get_xml_primary() == 1 { XmlPrimary::PerTake } else { XmlPrimary::All },
+        xml_scene_stringouts: ui.get_xml_scene_stringouts(),
+        xml_day_sequences: ui.get_xml_day_sequences(),
     };
     let existing = if mode == 1 { with_state(|s| s.existing.clone()) } else { None };
     let bin_index = ui.get_bin_index();
@@ -612,8 +713,12 @@ fn start_build(ui: &AppWindow) {
                 Ok(report) => {
                     with_state(|s| s.last_output = Some(output.clone()));
                     ui.set_can_reveal(true);
-                    let synced = if mode == 2 { "synced clips on one timeline" } else { "merged clips" };
-                    let mut parts = vec![format!("{} {synced}", report.merged_clips)];
+                    let mut parts = if mode == 2 {
+                        let seq = if report.sequences == 1 { "sequence".to_string() } else { format!("{} sequences", report.sequences) };
+                        vec![format!("{} synced takes, {seq}", report.takes)]
+                    } else {
+                        vec![format!("{} merged clips", report.merged_clips)]
+                    };
                     if report.plain_clips > 0 {
                         parts.push(format!("{} unsynced clips", report.plain_clips));
                     }
