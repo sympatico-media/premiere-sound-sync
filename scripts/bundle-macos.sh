@@ -20,6 +20,23 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/target/$PROFILE/$BIN" "$APP/Contents/MacOS/$BIN"
 
+# Static arm64 ffprobe (GPLv3) from https://ffmpeg.martin-riedl.de. Set FFPROBE=/path/to/ffprobe to use another build.
+FFPROBE_URL="https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffprobe.zip"
+FFPROBE_SHA256="fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6"
+if [ -z "${FFPROBE:-}" ]; then
+    CACHE="$ROOT/target/ffprobe-9.0.2-arm64"
+    if [ ! -x "$CACHE/ffprobe" ]; then
+        mkdir -p "$CACHE"
+        curl -fsSL "$FFPROBE_URL" -o "$CACHE/ffprobe.zip"
+        echo "$FFPROBE_SHA256  $CACHE/ffprobe.zip" | shasum -a 256 -c - >/dev/null
+        unzip -oq "$CACHE/ffprobe.zip" -d "$CACHE"
+        rm "$CACHE/ffprobe.zip"
+    fi
+    FFPROBE="$CACHE/ffprobe"
+fi
+cp "$FFPROBE" "$APP/Contents/Resources/ffprobe"
+chmod +x "$APP/Contents/Resources/ffprobe"
+
 ICONSET="$(mktemp -d)/AppIcon.iconset"
 mkdir -p "$ICONSET"
 SRC="$ROOT/apps/$BIN/assets/AppIcon.png"

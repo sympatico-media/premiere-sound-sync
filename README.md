@@ -20,16 +20,20 @@ Merged clips are trimmed to the stretch where picture and sound both exist. File
 
 ## How matching works
 
-Each file needs a start timecode. WAV, BWF, and RF64 audio are read directly from the Broadcast WAV `bext` and `iXML` chunks. Everything else is read with `ffprobe`.
+Each file needs a start timecode. WAV, BWF, and RF64 audio are read directly from the Broadcast WAV `bext` and `iXML` chunks. Everything else is read with `ffprobe`, which ships inside the macOS app.
 
 A video clip pairs with the audio file that overlaps it the most. The overlap has to be at least one second, or half the shorter clip when the clip is very short. Multicam groups angles that share that production audio, or that overlap each other and carry different camera ids.
 
 Slate (scene, shot, take, circled take) comes from recorder metadata, camera tags such as ARRI scene and take, or the file name (`12A-3`, `S12_T3`). The default clip name is `{scene}{shot}-{take}{circle}`. Other tokens are `{camera}` and `{clip}`.
 
-## Requirements
+## Download
+
+Get the Apple Silicon build from [Releases](https://github.com/sympatico-media/premiere-sound-sync/releases). It includes `ffprobe`, so nothing else needs to be installed.
+
+## Building from source
 
 - A recent stable [Rust](https://rustup.rs/) toolchain
-- [FFmpeg](https://ffmpeg.org/), so `ffprobe` is on `PATH` (or in `/opt/homebrew/bin` or `/usr/local/bin` on macOS)
+- [FFmpeg](https://ffmpeg.org/) for `cargo run`, so `ffprobe` is on `PATH` (or in `/opt/homebrew/bin` or `/usr/local/bin` on macOS)
 
 ## Run
 
@@ -43,7 +47,7 @@ On macOS, this builds a `Premiere Sync.app` bundle:
 scripts/bundle-macos.sh
 ```
 
-Pass `debug` to bundle the debug build. The app is written to `target/release/Premiere Sync.app`.
+Pass `debug` to bundle the debug build. The app is written to `target/release/Premiere Sync.app`. The script downloads a static arm64 `ffprobe` from [martin-riedl.de](https://ffmpeg.martin-riedl.de), checks its SHA-256, and puts it in `Contents/Resources`. Set `FFPROBE=/path/to/ffprobe` to bundle a different build.
 
 ## Headless
 
@@ -66,4 +70,4 @@ cargo run -p premiere-sound-sync-core --example sync -- timeline.xml /path/to/sh
 
 ## License
 
-MIT.
+MIT. The bundled `ffprobe` is part of [FFmpeg](https://ffmpeg.org/) and is licensed under the GPLv3. Its source is available from [ffmpeg.org](https://ffmpeg.org/download.html) and the build scripts from [martin-riedl.de](https://git.martin-riedl.de/ffmpeg/build-script).
