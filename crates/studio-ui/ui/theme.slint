@@ -1,0 +1,52 @@
+// Design tokens. Dark, quiet, macOS-native in feel.
+export global Theme {
+    // Surfaces
+    out property <color> window: #1b1c1f;
+    out property <color> sidebar: #1e1f22;
+    out property <color> content: #232428;
+    out property <color> group: #2a2b2f;
+    out property <color> field: #1d1e21;
+    out property <color> control: #3a3b40;
+    out property <color> control-hover: #45464c;
+    out property <color> control-pressed: #505158;
+    out property <color> row-hover: #ffffff0a;
+    out property <color> row-selected: #0a84ff40;
+    out property <color> selection: #ffffff12;
+    out property <color> selection-border: #ffffff26;
+    out property <color> divider: #121315;
+    out property <color> border: #3b3c41;
+    out property <color> dash: #5c5d63;
+
+    // Text
+    out property <color> text: #e6e6e8;
+    out property <color> text-secondary: #9c9da3;
+    out property <color> text-tertiary: #6e6f75;
+    out property <color> text-on-accent: #ffffff;
+
+    // Accents
+    out property <color> accent: #0a84ff;
+    out property <color> accent-hover: #2b95ff;
+    out property <color> accent-pressed: #0071e3;
+    out property <color> success: #30d158;
+    out property <color> warning: #ffd60a;
+    out property <color> danger: #ff453a;
+    out property <color> purple: #bf9cff;
+
+    // Shape and rhythm
+    out property <length> radius: 8px;
+    out property <length> radius-small: 6px;
+    out property <length> titlebar-height: 30px;
+    out property <length> pane-header-height: 40px;
+    out property <length> spacing: 8px;
+    out property <length> padding: 16px;
+
+    // Type
+    // San Francisco, the macOS system font (hidden family name).
+    out property <string> font-family: ".SF NS";
+    // Extra letter spacing (in em) so text matches native macOS widths; Slint skips
+    // the font's small-size optical adjustments that AppKit applies.
+    out property <float> tracking: 0.055;
+    out property <length> font-size: 13px;
+    out property <length> font-size-small: 12px;
+    out property <length> font-size-large: 15px;
+}

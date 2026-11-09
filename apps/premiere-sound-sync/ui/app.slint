@@ -1,0 +1,540 @@
+import { ComboBox, ListView, Spinner, ProgressIndicator } from "std-widgets.slint";
+import {
+    Theme, Icons, Label, CheckBox, Pane, VDivider, HDivider, DropZone, GroupBox, PrimaryButton, LinkButton, Pill, FileTile, Tile,
+    TextField, TokenButton
+} from "@studio";
+
+export struct SourceItem {
+    title: string,
+    subtitle: string,
+    is-folder: bool,
+    icon: image,
+}
+
+export struct MediaRow {
+    name: string,
+    is-video: bool,
+    timecode: string,
+    duration: string,
+    slate: string,
+    status: string,
+    // 0 neutral, 1 synced, 2 multicam, 3 unsynced, 4 error
+    tone: int,
+    partner: string,
+}
+
+component Column inherits Label {
+    color: Theme.text-tertiary;
+    font-size: Theme.font-size-small;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component MediaRowView inherits Rectangle {
+    in property <MediaRow> entry;
+    in property <bool> alternate;
+    height: 30px;
+    background: hover.has-hover ? Theme.row-hover : root.alternate ? #ffffff04 : transparent;
+    hover := TouchArea { }
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 12px;
+        Image {
+            source: root.entry.is-video ? Icons.film : Icons.wave;
+            width: 15px;
+            colorize: root.entry.is-video ? #8fc1ff : #9be3a4;
+            vertical-alignment: center;
+        }
+        Label {
+            text: root.entry.name;
+            color: Theme.text;
+            font-size: Theme.font-size;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+            min-width: 120px;
+        }
+        Label {
+            text: root.entry.timecode;
+            width: 92px;
+            color: Theme.text-secondary;
+            font-size: Theme.font-size-small;
+            font-family: "Menlo";
+            letter-spacing: 0;
+            vertical-alignment: center;
+        }
+        Label {
+            text: root.entry.duration;
+            width: 56px;
+            color: Theme.text-secondary;
+            font-size: Theme.font-size-small;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+        Label {
+            text: root.entry.slate;
+            width: 76px;
+            color: Theme.text-secondary;
+            font-size: Theme.font-size-small;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        HorizontalLayout {
+            width: 190px;
+            spacing: 6px;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Pill {
+                    text: root.entry.status;
+                    tone: root.entry.tone == 1 ? Theme.success : root.entry.tone == 2 ? Theme.purple : root.entry.tone == 4 ? Theme.danger : Theme.text-secondary;
+                }
+            }
+            Label {
+                text: root.entry.partner;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-size-small;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Premiere Sync";
+    preferred-width: 1260px;
+    preferred-height: 740px;
+    min-height: 620px;
+    background: Theme.window;
+    default-font-size: Theme.font-size;
+    default-font-family: Theme.font-family;
+
+    in property <image> new-project-icon: Icons.project-new;
+    in property <image> existing-project-icon: Icons.project;
+    in property <image> xml-icon: Icons.file;
+    in property <[SourceItem]> sources;
+    in property <bool> drop-active;
+
+    in property <[MediaRow]> media;
+    in property <bool> scanning;
+    in property <float> scan-progress;
+
+    in-out property <bool> rename: true;
+    in-out property <string> name-template;
+    in-out property <bool> scene-bins: true;
+    in-out property <bool> shot-bins: false;
+    in-out property <bool> multicam: true;
+    in-out property <bool> import-unsynced: true;
+    in-out property <bool> trim: true;
+
+    // 0 new project, 1 existing project, 2 XML timeline
+    in-out property <int> dest-mode: 0;
+    in property <string> project-name;
+    in property <string> project-detail;
+    in property <[string]> bins;
+    in-out property <int> bin-index: 1;
+    in-out property <string> new-bin-name: "Synced";
+    in property <string> output-name;
+
+    in property <string> status;
+    // 0 neutral, 1 success, 2 warning, 3 error
+    in property <int> status-tone;
+    in property <bool> building;
+    in property <bool> can-build;
+    in property <bool> can-reveal;
+
+    callback add-sources();
+    callback remove-source(int);
+    callback clear-sources();
+    callback options-changed();
+    callback choose-new();
+    callback choose-existing();
+    callback choose-xml();
+    callback change-output();
+    callback build();
+    callback reveal();
+
+    HorizontalLayout {
+        spacing: 0;
+
+        // Sources
+        Pane {
+            title: "Sources";
+            width: 250px;
+            VerticalLayout {
+                padding: 14px;
+                padding-top: 4px;
+                spacing: 8px;
+                if root.sources.length > 0: Flickable {
+                    preferred-height: root.sources.length * 140px + (root.sources.length - 1) * 4px;
+                    min-height: min(self.preferred-height, 140px);
+                    max-height: self.preferred-height;
+                    vertical-stretch: 0;
+                    content-width: self.width;
+                    content-height: self.preferred-height;
+                    VerticalLayout {
+                        width: parent.width;
+                        spacing: 4px;
+                        alignment: start;
+                        for source[i] in root.sources: FileTile {
+                            icon: source.icon;
+                            title: source.title;
+                            subtitle: source.subtitle;
+                            remove => {
+                                root.remove-source(i);
+                            }
+                        }
+                    }
+                }
+                DropZone {
+                    vertical-stretch: 1;
+                    min-height: 110px;
+                    active: root.drop-active;
+                    hint: root.sources.length == 0 ? "Drop a project folder" : "Add folders or files";
+                    detail: root.sources.length == 0 ? "Every audio and video file inside is found automatically" : "";
+                    clicked => {
+                        root.add-sources();
+                    }
+                }
+                if root.sources.length > 0: HorizontalLayout {
+                    alignment: center;
+                    LinkButton {
+                        text: "Clear all";
+                        clicked => {
+                            root.clear-sources();
+                        }
+                    }
+                }
+            }
+        }
+
+        VDivider { }
+
+        // Media + options
+        Rectangle {
+            background: Theme.content;
+            horizontal-stretch: 1;
+            VerticalLayout {
+                padding-top: Theme.titlebar-height;
+                spacing: 0;
+                Rectangle {
+                    height: Theme.pane-header-height;
+                    Label {
+                        text: "Media";
+                        color: Theme.text;
+                        font-weight: 600;
+                    }
+                }
+                if root.scanning: ProgressIndicator {
+                    height: 3px;
+                    progress: root.scan-progress;
+                }
+                if root.media.length > 0: HorizontalLayout {
+                    height: 24px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 12px;
+                    Rectangle {
+                        width: 15px;
+                    }
+                    Column {
+                        text: "Name";
+                        horizontal-stretch: 1;
+                        min-width: 120px;
+                    }
+                    Column {
+                        text: "Timecode";
+                        width: 92px;
+                    }
+                    Column {
+                        text: "Length";
+                        width: 56px;
+                        horizontal-alignment: right;
+                    }
+                    Column {
+                        text: "Scene / Take";
+                        width: 76px;
+                    }
+                    Column {
+                        text: "Sync";
+                        width: 190px;
+                    }
+                }
+                if root.media.length > 0: HDivider {
+                    background: #ffffff0d;
+                }
+                if root.media.length > 0: ListView {
+                    vertical-stretch: 1;
+                    for row[i] in root.media: MediaRowView {
+                        entry: row;
+                        alternate: mod(i, 2) == 1;
+                    }
+                }
+                if root.media.length == 0: Rectangle {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Label {
+                            text: root.scanning ? "Reading media…" : "No media yet";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-size-large;
+                            horizontal-alignment: center;
+                        }
+                        Label {
+                            text: root.scanning ? "" : "Add a project folder on the left. Video and audio files are matched by timecode.";
+                            color: Theme.text-tertiary;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                HDivider { }
+
+                // Options
+                HorizontalLayout {
+                    padding: 14px;
+                    spacing: 14px;
+                    GroupBox {
+                        title: "CLIP NAMES";
+                        horizontal-stretch: 1;
+                        CheckBox {
+                            text: "Name Premiere clips from slate";
+                            checked <=> root.rename;
+                            toggled => {
+                                root.options-changed();
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Label {
+                                text: "Template";
+                                color: root.rename ? Theme.text : Theme.text-tertiary;
+                                vertical-alignment: center;
+                            }
+                            TextField {
+                                enabled: root.rename;
+                                text <=> root.name-template;
+                                edited => {
+                                    root.options-changed();
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 5px;
+                            alignment: start;
+                            for token in [
+                                { label: "Scene", value: "{scene}" },
+                                { label: "Shot", value: "{shot}" },
+                                { label: "Take", value: "{take}" },
+                                { label: "Circle", value: "{circle}" },
+                                { label: "Camera", value: "{camera}" },
+                                { label: "Clip", value: "{clip}" },
+                            ]: TokenButton {
+                                text: token.label;
+                                enabled: root.rename;
+                                clicked => {
+                                    root.name-template += token.value;
+                                    root.options-changed();
+                                }
+                            }
+                        }
+                        Label {
+                            text: "Only the clip names inside Premiere change. Your files on disk keep their original names.";
+                            color: Theme.text-tertiary;
+                            font-size: Theme.font-size-small;
+                            wrap: word-wrap;
+                            preferred-width: 0px;
+                        }
+                    }
+                    GroupBox {
+                        title: "ORGANIZE";
+                        horizontal-stretch: 1;
+                        HorizontalLayout {
+                            spacing: 18px;
+                            alignment: start;
+                            VerticalLayout {
+                                spacing: 8px;
+                                CheckBox {
+                                    text: "Bin per scene";
+                                    checked <=> root.scene-bins;
+                                    enabled: root.dest-mode != 2;
+                                    toggled => {
+                                        root.options-changed();
+                                    }
+                                }
+                                CheckBox {
+                                    text: "Bin per shot";
+                                    checked <=> root.shot-bins;
+                                    enabled: root.dest-mode != 2;
+                                    toggled => {
+                                        root.options-changed();
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                CheckBox {
+                                    text: "Multicam when timecode overlaps";
+                                    checked <=> root.multicam;
+                                    enabled: root.dest-mode != 2;
+                                    toggled => {
+                                        root.options-changed();
+                                    }
+                                }
+                                CheckBox {
+                                    text: "Import unsynced files";
+                                    checked <=> root.import-unsynced;
+                                    enabled: root.dest-mode != 2;
+                                    toggled => {
+                                        root.options-changed();
+                                    }
+                                }
+                                CheckBox {
+                                    text: "Trim clips to match";
+                                    checked <=> root.trim;
+                                }
+                            }
+                        }
+                        Label {
+                            text: root.dest-mode == 2 ? "An XML timeline has no bins, multicam or unsynced clips. Trimming removes the gaps between clips." : "Trimming cuts each merged clip down to where picture and sound both exist.";
+                            color: Theme.text-tertiary;
+                            font-size: Theme.font-size-small;
+                            wrap: word-wrap;
+                            preferred-width: 0px;
+                        }
+                    }
+                }
+
+                // Footer
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 14px;
+                    padding-bottom: 14px;
+                    spacing: 10px;
+                    height: 42px;
+                    Label {
+                        text: root.status;
+                        color: root.status-tone == 1 ? Theme.success : root.status-tone == 2 ? Theme.warning : root.status-tone == 3 ? Theme.danger : Theme.text-secondary;
+                        font-size: Theme.font-size-small;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    if root.building: Spinner {
+                        width: 18px;
+                        height: 18px;
+                        indeterminate: true;
+                    }
+                    if root.can-reveal: VerticalLayout {
+                        alignment: center;
+                        LinkButton {
+                            text: "Show in Finder";
+                            clicked => {
+                                root.reveal();
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        PrimaryButton {
+                            text: root.dest-mode == 0 ? "Create Project" : root.dest-mode == 1 ? "Add to Project" : "Export XML";
+                            enabled: root.can-build && !root.building && !root.scanning;
+                            clicked => {
+                                root.build();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        VDivider { }
+
+        // Destination
+        Pane {
+            title: "Destination";
+            width: 260px;
+            VerticalLayout {
+                padding: 14px;
+                padding-top: 4px;
+                spacing: 10px;
+                Tile {
+                    image: root.new-project-icon;
+                    title: "New Project";
+                    subtitle: root.dest-mode == 0 && root.output-name != "" ? root.output-name : "Create a Premiere project";
+                    selected: root.dest-mode == 0;
+                    clicked => {
+                        root.choose-new();
+                    }
+                }
+                Tile {
+                    image: root.existing-project-icon;
+                    title: root.project-name != "" ? root.project-name : "Existing Project";
+                    subtitle: root.project-detail != "" ? root.project-detail : "Add clips to a .prproj";
+                    selected: root.dest-mode == 1;
+                    clicked => {
+                        root.choose-existing();
+                    }
+                }
+                Tile {
+                    image: root.xml-icon;
+                    title: "XML Timeline";
+                    subtitle: root.dest-mode == 2 && root.output-name != "" ? root.output-name : "For Premiere or Resolve";
+                    selected: root.dest-mode == 2;
+                    clicked => {
+                        root.choose-xml();
+                    }
+                }
+                if root.dest-mode == 1 && root.project-name != "": VerticalLayout {
+                    spacing: 8px;
+                    padding-top: 6px;
+                    Label {
+                        text: "Put new clips in";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-size-small;
+                    }
+                    ComboBox {
+                        model: root.bins;
+                        current-index <=> root.bin-index;
+                    }
+                    if root.bin-index == 1: TextField {
+                        text <=> root.new-bin-name;
+                        placeholder-text: "Bin name";
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+                if root.output-name != "": VerticalLayout {
+                    spacing: 2px;
+                    Label {
+                        text: "Saves as";
+                        color: Theme.text-tertiary;
+                        font-size: Theme.font-size-small;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Label {
+                            text: root.output-name;
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-size-small;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        LinkButton {
+                            text: "Change…";
+                            clicked => {
+                                root.change-output();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

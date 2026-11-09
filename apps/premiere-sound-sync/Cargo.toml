@@ -1,0 +1,15 @@
+[package]
+name = "premiere-sound-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sync production audio to video and build Premiere Pro projects with merged clips."
+
+[dependencies]
+premiere-sound-sync-core = { path = "../../crates/premiere-sound-sync-core" }
+studio-ui = { path = "../../crates/studio-ui" }
+slint.workspace = true
+anyhow.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true

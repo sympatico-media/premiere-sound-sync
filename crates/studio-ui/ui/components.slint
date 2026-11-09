@@ -1,0 +1,696 @@
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+
+// Text with native-looking letter spacing. Use instead of `Text` everywhere.
+export component Label inherits Text {
+    font-size: Theme.font-size;
+    color: Theme.text;
+    letter-spacing: self.font-size * Theme.tracking;
+}
+
+// macOS-style checkbox whose label uses the studio type settings.
+export component CheckBox inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    callback toggled();
+    height: 20px;
+    HorizontalLayout {
+        spacing: 7px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 3.5px;
+                background: root.checked ? (root.enabled ? Theme.accent : #0a84ff66) : #ffffff1a;
+                border-width: root.checked ? 0 : 1px;
+                border-color: #ffffff33;
+                if root.checked: Image {
+                    source: Icons.check;
+                    colorize: white;
+                    width: 10px;
+                    height: 10px;
+                }
+            }
+        }
+        Label {
+            text: root.text;
+            color: root.enabled ? Theme.text : Theme.text-tertiary;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+}
+
+
+// A full-height column with a centered title, like Finder-style source / destination panes.
+export component Pane inherits Rectangle {
+    in property <string> title;
+    in property <color> tone: Theme.sidebar;
+    background: tone;
+    VerticalLayout {
+        padding-top: Theme.titlebar-height;
+        spacing: 0;
+        HorizontalLayout {
+            height: Theme.pane-header-height;
+            alignment: center;
+            Label {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.font-size;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+        @children
+    }
+}
+
+export component VDivider inherits Rectangle {
+    width: 1px;
+    background: Theme.divider;
+}
+
+export component HDivider inherits Rectangle {
+    height: 1px;
+    background: Theme.divider;
+}
+
+// Rounded rectangle outline drawn with dashes.
+export component DashedBorder inherits Rectangle {
+    in property <color> stroke: Theme.dash;
+    in property <length> dash: 16px;
+    in property <length> gap: 10px;
+    in property <length> thickness: 2px;
+    in property <length> corner: 12px;
+
+    property <length> run-x: max(0px, root.width - 2 * root.corner);
+    property <length> run-y: max(0px, root.height - 2 * root.corner);
+    property <int> count-x: max(0, floor((root.run-x + root.gap) / (root.dash + root.gap)));
+    property <int> count-y: max(0, floor((root.run-y + root.gap) / (root.dash + root.gap)));
+    property <length> offset-x: root.corner + (root.run-x - (root.count-x * (root.dash + root.gap) - root.gap)) / 2;
+    property <length> offset-y: root.corner + (root.run-y - (root.count-y * (root.dash + root.gap) - root.gap)) / 2;
+
+    for i in root.count-x: Rectangle {
+        x: root.offset-x + i * (root.dash + root.gap);
+        y: 0;
+        width: root.dash;
+        height: root.thickness;
+        background: root.stroke;
+        border-radius: root.thickness / 2;
+    }
+    for i in root.count-x: Rectangle {
+        x: root.offset-x + i * (root.dash + root.gap);
+        y: root.height - root.thickness;
+        width: root.dash;
+        height: root.thickness;
+        background: root.stroke;
+        border-radius: root.thickness / 2;
+    }
+    for i in root.count-y: Rectangle {
+        x: 0;
+        y: root.offset-y + i * (root.dash + root.gap);
+        width: root.thickness;
+        height: root.dash;
+        background: root.stroke;
+        border-radius: root.thickness / 2;
+    }
+    for i in root.count-y: Rectangle {
+        x: root.width - root.thickness;
+        y: root.offset-y + i * (root.dash + root.gap);
+        width: root.thickness;
+        height: root.dash;
+        background: root.stroke;
+        border-radius: root.thickness / 2;
+    }
+    // Corners: quarter arcs clipped from a rounded outline.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.corner;
+        height: root.corner;
+        clip: true;
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: 2 * root.corner;
+            height: 2 * root.corner;
+            border-radius: root.corner;
+            border-width: root.thickness;
+            border-color: root.stroke;
+        }
+    }
+    Rectangle {
+        x: root.width - root.corner;
+        y: 0;
+        width: root.corner;
+        height: root.corner;
+        clip: true;
+        Rectangle {
+            x: -root.corner;
+            y: 0;
+            width: 2 * root.corner;
+            height: 2 * root.corner;
+            border-radius: root.corner;
+            border-width: root.thickness;
+            border-color: root.stroke;
+        }
+    }
+    Rectangle {
+        x: 0;
+        y: root.height - root.corner;
+        width: root.corner;
+        height: root.corner;
+        clip: true;
+        Rectangle {
+            x: 0;
+            y: -root.corner;
+            width: 2 * root.corner;
+            height: 2 * root.corner;
+            border-radius: root.corner;
+            border-width: root.thickness;
+            border-color: root.stroke;
+        }
+    }
+    Rectangle {
+        x: root.width - root.corner;
+        y: root.height - root.corner;
+        width: root.corner;
+        height: root.corner;
+        clip: true;
+        Rectangle {
+            x: -root.corner;
+            y: -root.corner;
+            width: 2 * root.corner;
+            height: 2 * root.corner;
+            border-radius: root.corner;
+            border-width: root.thickness;
+            border-color: root.stroke;
+        }
+    }
+}
+
+// Small square button with a line icon and a hairline border.
+export component IconButton inherits Rectangle {
+    in property <image> icon: Icons.plus;
+    in property <length> size: 28px;
+    in property <length> icon-size: 16px;
+    in property <bool> borderless: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: root.size;
+    height: root.size;
+    border-radius: Theme.radius-small;
+    border-width: root.borderless ? 0px : 1px;
+    border-color: touch.has-hover ? #6a6b71 : #4a4b51;
+    background: touch.pressed ? Theme.control-pressed : touch.has-hover ? Theme.control : root.borderless ? transparent : #26272b;
+    opacity: root.enabled ? 1 : 0.4;
+    Image {
+        source: root.icon;
+        width: root.icon-size;
+        height: root.icon-size;
+        colorize: touch.has-hover ? Theme.text : Theme.text-secondary;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Dashed drop target with a centered add button.
+export component DropZone inherits Rectangle {
+    in property <bool> active;
+    in property <string> hint;
+    in property <string> detail;
+    callback clicked;
+    border-radius: 12px;
+    background: root.active ? #0a84ff14 : area.has-hover ? #ffffff05 : transparent;
+    area := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+    DashedBorder {
+        width: 100%;
+        height: 100%;
+        stroke: root.active ? Theme.accent : Theme.dash;
+    }
+    VerticalLayout {
+        alignment: center;
+        spacing: 10px;
+        padding: 12px;
+        HorizontalLayout {
+            alignment: center;
+            IconButton {
+                icon: Icons.plus;
+                clicked => {
+                    root.clicked();
+                }
+            }
+        }
+        if root.hint != "": Label {
+            text: root.hint;
+            color: Theme.text-secondary;
+            font-size: Theme.font-size;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        if root.detail != "": Label {
+            text: root.detail;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-size-small;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Inset panel for grouped settings.
+export component GroupBox inherits Rectangle {
+    in property <string> title;
+    background: Theme.group;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        alignment: start;
+        if root.title != "": Label {
+            text: root.title;
+            color: Theme.text-secondary;
+            font-size: Theme.font-size-small;
+            font-weight: 600;
+        }
+        @children
+    }
+}
+
+export component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: 90px;
+    height: 28px;
+    border-radius: Theme.radius-small;
+    background: !root.enabled ? #0a84ff59 : touch.pressed ? Theme.accent-pressed : touch.has-hover ? Theme.accent-hover : Theme.accent;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        Label {
+            text: root.text;
+            color: root.enabled ? Theme.text-on-accent : #ffffff8c;
+            font-size: Theme.font-size;
+            font-weight: 500;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component SecondaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: 72px;
+    height: 28px;
+    border-radius: Theme.radius-small;
+    background: touch.pressed ? Theme.control-pressed : touch.has-hover ? Theme.control-hover : Theme.control;
+    opacity: root.enabled ? 1 : 0.45;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Label {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.font-size;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Borderless text action, e.g. "Change…".
+export component LinkButton inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    height: 20px;
+    HorizontalLayout {
+        Label {
+            text: root.text;
+            color: touch.has-hover ? Theme.accent-hover : Theme.accent;
+            font-size: Theme.font-size-small;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// macOS-style single-line text field with a focus ring.
+export component TextField inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <string> placeholder-text;
+    in property <string> font-family;
+    in-out property <string> text;
+    callback edited(string);
+    callback accepted(string);
+    height: 26px;
+    min-width: 80px;
+    horizontal-stretch: 1;
+
+    ring := Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: Theme.radius-small + 3px;
+        border-width: 3px;
+        border-color: input.has-focus ? Theme.accent.with-alpha(0.5) : transparent;
+        animate border-color { duration: 120ms; }
+    }
+    Rectangle {
+        border-radius: Theme.radius-small;
+        background: root.enabled ? #ffffff0d : #ffffff06;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.accent : #ffffff1f;
+        clip: true;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            Rectangle {
+                if root.text == "" && root.placeholder-text != "": Label {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.placeholder-text;
+                    color: Theme.text-tertiary;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                input := TextInput {
+                    width: parent.width;
+                    height: parent.height;
+                    text <=> root.text;
+                    enabled: root.enabled;
+                    single-line: true;
+                    vertical-alignment: center;
+                    font-size: Theme.font-size;
+                    font-family: root.font-family != "" ? root.font-family : Theme.font-family;
+                    letter-spacing: self.font-size * Theme.tracking;
+                    color: root.enabled ? Theme.text : Theme.text-tertiary;
+                    selection-background-color: Theme.accent.with-alpha(0.45);
+                    selection-foreground-color: Theme.text;
+                    edited => {
+                        root.edited(self.text);
+                    }
+                    accepted => {
+                        root.accepted(self.text);
+                    }
+                }
+            }
+        }
+    }
+    TouchArea {
+        enabled: root.enabled && !input.has-focus;
+        mouse-cursor: MouseCursor.text;
+        clicked => {
+            input.focus();
+        }
+    }
+}
+
+// Small rounded chip for inserting a placeholder token, like Finder's rename format pills.
+export component TokenButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 20px;
+    border-radius: 10px;
+    background: !root.enabled ? #ffffff06 : touch.pressed ? #ffffff2a : touch.has-hover ? #ffffff1f : #ffffff12;
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        Label {
+            text: root.text;
+            color: root.enabled ? Theme.text-secondary : Theme.text-tertiary;
+            font-size: Theme.font-size-small;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Rounded status label. `tone` picks the tint.
+export component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> tone: Theme.text-secondary;
+    height: 18px;
+    border-radius: 9px;
+    background: root.tone.with-alpha(0.16);
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Label {
+            text: root.text;
+            color: root.tone;
+            font-size: Theme.font-size-small;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Removable list entry with an icon, title and subtitle.
+export component ItemCard inherits Rectangle {
+    in property <image> icon: Icons.folder;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> removable: true;
+    callback remove;
+    height: 44px;
+    border-radius: Theme.radius-small;
+    background: hover.has-hover ? #ffffff0d : #ffffff06;
+    hover := TouchArea { }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        spacing: 10px;
+        Image {
+            source: root.icon;
+            width: 18px;
+            colorize: Theme.text-secondary;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            Label {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.font-size;
+                overflow: elide;
+            }
+            if root.subtitle != "": Label {
+                text: root.subtitle;
+                color: Theme.text-tertiary;
+                font-size: Theme.font-size-small;
+                overflow: elide;
+            }
+        }
+        if root.removable: VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: Icons.close;
+                size: 22px;
+                icon-size: 12px;
+                borderless: true;
+                opacity: hover.has-hover ? 1 : 0;
+                clicked => {
+                    root.remove();
+                }
+            }
+        }
+    }
+}
+
+// Finder icon-view item sized like `Tile`: large file icon, name and detail below, remove button on hover.
+export component FileTile inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> removable: true;
+    callback remove;
+    property <bool> hovered: hover.has-hover || close-touch.has-hover;
+    height: 140px;
+    border-radius: 10px;
+    background: root.hovered ? #ffffff08 : transparent;
+    hover := TouchArea { }
+    VerticalLayout {
+        padding: 10px;
+        spacing: 4px;
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: root.icon;
+                width: 64px;
+                height: 64px;
+            }
+        }
+        Label {
+            text: root.title;
+            font-weight: 500;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        Label {
+            text: root.subtitle;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-size-small;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+    if root.removable: Rectangle {
+        x: parent.width - self.width - 8px;
+        y: 8px;
+        width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        opacity: root.hovered ? 1 : 0;
+        background: close-touch.has-hover ? #ffffff38 : #ffffff1f;
+        animate opacity { duration: 120ms; }
+        Image {
+            source: Icons.close;
+            width: 8px;
+            height: 8px;
+            colorize: Theme.text;
+        }
+    }
+    close-touch := TouchArea {
+        x: parent.width - self.width - 8px;
+        y: 8px;
+        width: 20px;
+        height: 20px;
+        enabled: root.removable;
+        mouse-cursor: pointer;
+        clicked => {
+            root.remove();
+        }
+    }
+}
+
+// Large selectable tile with an illustration, like a destination drive.
+export component Tile inherits Rectangle {
+    in property <image> image;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> selected;
+    callback clicked;
+    height: 140px;
+    border-radius: 10px;
+    background: root.selected ? Theme.selection : touch.has-hover ? #ffffff08 : transparent;
+    border-width: root.selected ? 1px : 0px;
+    border-color: Theme.selection-border;
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+    VerticalLayout {
+        padding: 10px;
+        spacing: 4px;
+        alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: root.image;
+                width: 64px;
+                height: 64px;
+            }
+        }
+        Label {
+            text: root.title;
+            color: Theme.text;
+            font-size: Theme.font-size;
+            font-weight: 500;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        Label {
+            text: root.subtitle;
+            color: Theme.text-tertiary;
+            font-size: Theme.font-size-small;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// Labeled row for forms: label on the left, control on the right.
+export component FormRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <length> label-width: 110px;
+    spacing: 10px;
+    Label {
+        text: root.label;
+        width: root.label-width;
+        color: Theme.text;
+        font-size: Theme.font-size;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+    @children
+}
+
+// Thin footer with a status message.
+export component StatusBar inherits Rectangle {
+    in property <string> text;
+    in property <color> tone: Theme.text-secondary;
+    height: 28px;
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Label {
+            text: root.text;
+            color: root.tone;
+            font-size: Theme.font-size-small;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
