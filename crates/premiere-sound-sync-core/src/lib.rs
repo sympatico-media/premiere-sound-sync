@@ -1,5 +1,5 @@
 //! Core of Premiere Sync: find media, read timecode and slate metadata, pair video with
-//! production audio, and write merged clips / bins into Premiere Pro projects.
+//! production audio, and write merged clips, bins and sequences into Premiere Pro projects.
 
 pub mod build;
 pub mod bwf;
@@ -13,7 +13,7 @@ pub mod time;
 pub mod waveform;
 pub mod xmeml;
 
-pub use build::{build, build_xml, BuildOptions, BuildReport, XmlPrimary};
+pub use build::{build, build_xml, BuildOptions, BuildReport, Timeline};
 pub use media::{MediaFile, MediaKind, Slate};
 pub use prproj::{BinInfo, Project};
 pub use sync::{plan, SyncMethod, SyncOptions, SyncPlan};

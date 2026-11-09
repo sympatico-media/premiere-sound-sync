@@ -475,8 +475,30 @@ fn clip_project_item(w: &mut Writer, name: &str, master: &str) -> String {
     )
 }
 
+/// A regular clip in the bin for one source file, plus the media chains that sequence items
+/// cut from it play.
+#[derive(Debug, Clone)]
+pub struct SourceClip {
+    /// Project item UID, for putting the clip in a bin.
+    pub item: String,
+    master: String,
+    video: Option<Chain>,
+    /// One chain per audio channel.
+    audio: Vec<Chain>,
+}
+
 /// Imports a video file (with its camera audio) as a regular clip. Returns the project item UID.
 pub fn plain_video_clip(w: &mut Writer, name: &str, v: &VideoSpec) -> String {
+    video_source_clip(w, name, v).item
+}
+
+/// Imports an audio file as a regular multichannel clip. Returns the project item UID.
+pub fn plain_audio_clip(w: &mut Writer, name: &str, a: &AudioSpec, time_display: u32) -> String {
+    audio_source_clip(w, name, a, time_display).item
+}
+
+/// Imports a video file (with its camera audio) as a regular clip.
+pub fn video_source_clip(w: &mut Writer, name: &str, v: &VideoSpec) -> SourceClip {
     let (video, audio) = video_media(w, v);
     let mut clips = vec![video_clip(w, video.source, Some(video.markers), None, false, true)];
     for chain in &audio {
@@ -509,11 +531,16 @@ pub fn plain_video_clip(w: &mut Writer, name: &str, v: &VideoSpec) -> String {
             name,
         },
     );
-    clip_project_item(w, name, &master)
+    SourceClip {
+        item: clip_project_item(w, name, &master),
+        master,
+        video: Some(video),
+        audio,
+    }
 }
 
-/// Imports an audio file as a regular multichannel clip. Returns the project item UID.
-pub fn plain_audio_clip(w: &mut Writer, name: &str, a: &AudioSpec, time_display: u32) -> String {
+/// Imports an audio file as a regular multichannel clip.
+pub fn audio_source_clip(w: &mut Writer, name: &str, a: &AudioSpec, time_display: u32) -> SourceClip {
     let chains: Vec<Chain> = (0..a.channels).map(|ch| audio_channel(w, a, ch, time_display)).collect();
     let clips: Vec<u64> = chains
         .iter()
@@ -542,7 +569,12 @@ pub fn plain_audio_clip(w: &mut Writer, name: &str, a: &AudioSpec, time_display:
             name,
         },
     );
-    clip_project_item(w, name, &master)
+    SourceClip {
+        item: clip_project_item(w, name, &master),
+        master,
+        video: None,
+        audio: chains,
+    }
 }
 
 /// Sample-accurate placement of the video and audio inside a merged clip.
@@ -803,6 +835,173 @@ fn sub_clip(w: &mut Writer, clip: u64, master: &str, name: &str, channel_group: 
     )
 }
 
+/// A hidden master clip for one source file, as Premiere makes for each side of a merged clip,
+/// plus the media chain that track items cut from it play.
+#[derive(Debug, Clone)]
+struct Component {
+    master: String,
+    chain: Chain,
+}
+
+/// Component master for channel `k` of `audio`. Every channel's media is listed, but only
+/// channel `k` is enabled.
+fn audio_component(w: &mut Writer, name: &str, audio: &AudioSpec, k: u32, time_display: u32, range: Option<(i64, i64)>, props: &[(&str, String)]) -> Component {
+    let n = audio.channels;
+    let chains: Vec<Chain> = (0..n).map(|ch| audio_channel(w, audio, ch, time_display)).collect();
+    let clips: Vec<u64> = chains
+        .iter()
+        .map(|c| audio_clip(w, c.source, Some(c.markers), range, true, true))
+        .collect();
+    let log = logging(
+        w,
+        Logging {
+            clip_name: name,
+            capture_mode: true,
+            media_in: audio.start,
+            media_out: audio.start + audio.duration,
+            rate: audio.sample_tick,
+            format: 200,
+        },
+    );
+    let groups = channel_groups(w, Groups::Only(n, k));
+    let master = master_clip(
+        w,
+        Master {
+            properties: props,
+            logging: log,
+            audio_chains: n as usize,
+            clips: &clips,
+            groups,
+            name,
+        },
+    );
+    Component { master, chain: chains[k as usize] }
+}
+
+/// Component master for the picture of `video`, without its camera audio.
+fn video_component(w: &mut Writer, name: &str, video: &VideoSpec, range: Option<(i64, i64)>, props: &[(&str, String)]) -> Component {
+    let silent = VideoSpec {
+        audio_channels: 0,
+        ..video.clone()
+    };
+    let (chain, _) = video_media(w, &silent);
+    let clip = video_clip(w, chain.source, Some(chain.markers), range, true, true);
+    let log = logging(
+        w,
+        Logging {
+            clip_name: name,
+            capture_mode: false,
+            media_in: video.start,
+            media_out: video.start + video.duration,
+            rate: video.frame,
+            format: video.time_display,
+        },
+    );
+    let groups = channel_groups(w, Groups::Empty);
+    let master = master_clip(
+        w,
+        Master {
+            properties: props,
+            logging: log,
+            audio_chains: 0,
+            clips: &[clip],
+            groups,
+            name,
+        },
+    );
+    Component { master, chain }
+}
+
+fn track_item_start(start: i64) -> String {
+    if start != 0 {
+        format!("<Start>{start}</Start>")
+    } else {
+        String::new()
+    }
+}
+
+/// An audio track item from `start` to `end` on its sequence, playing `range` of `chain`, which
+/// is channel `channel` of `master`.
+fn audio_track_item(w: &mut Writer, master: &str, chain: Chain, name: &str, channel: u32, start: i64, end: i64, range: (i64, i64)) -> u64 {
+    let clip = audio_clip(w, chain.source, Some(chain.markers), Some(range), false, true);
+    let sub = sub_clip(w, clip, master, name, channel);
+    let components = default_audio_chain(w);
+    w.obj(
+        "AudioClipTrackItem",
+        class::AUDIO_CLIP_TRACK_ITEM,
+        11,
+        &format!(
+            r#"<ClipTrackItem Version="8"><ComponentOwner Version="1"><Components ObjectRef="{components}"/></ComponentOwner><TrackItem Version="4">{}<End>{end}</End></TrackItem><SubClip ObjectRef="{sub}"/></ClipTrackItem><ID>{}</ID><PreRenderComponentChainHashVersion>1</PreRenderComponentChainHashVersion>"#,
+            track_item_start(start),
+            new_uid()
+        ),
+    )
+}
+
+/// A video track item from `start` to `end` on its sequence, playing `range` of `chain`, the
+/// picture of `master`.
+fn video_track_item(w: &mut Writer, master: &str, chain: Chain, name: &str, video: &VideoSpec, start: i64, end: i64, range: (i64, i64)) -> u64 {
+    let clip = video_clip(w, chain.source, Some(chain.markers), Some(range), false, true);
+    let sub = sub_clip(w, clip, master, name, 0);
+    let components = w.obj(
+        "VideoComponentChain",
+        class::VIDEO_COMPONENT_CHAIN,
+        3,
+        r#"<DefaultMotion>true</DefaultMotion><DefaultOpacity>true</DefaultOpacity><DefaultMotionComponentID>1</DefaultMotionComponentID><DefaultOpacityComponentID>2</DefaultOpacityComponentID><ComponentChain Version="3"></ComponentChain>"#,
+    );
+    w.obj(
+        "VideoClipTrackItem",
+        class::VIDEO_CLIP_TRACK_ITEM,
+        8,
+        &format!(
+            r#"<ClipTrackItem Version="8"><ComponentOwner Version="1"><Components ObjectRef="{components}"/></ComponentOwner><TrackItem Version="4">{}<End>{end}</End></TrackItem><SubClip ObjectRef="{sub}"/></ClipTrackItem><ToneMapSettings>{{"peak":-1,"version":3}}</ToneMapSettings><FrameRect>0,0,{},{}</FrameRect><PixelAspectRatio>1,1</PixelAspectRatio>"#,
+            track_item_start(start),
+            video.width,
+            video.height
+        ),
+    )
+}
+
+fn link(w: &mut Writer, items: &[u64]) -> u64 {
+    let list: String = items
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!(r#"<TrackItem Index="{i}" ObjectRef="{t}"/>"#))
+        .collect();
+    w.obj(
+        "Link",
+        class::LINK,
+        1,
+        &format!(r#"<TrackItemGroup Version="1"><TrackItems Version="1">{list}</TrackItems></TrackItemGroup>"#),
+    )
+}
+
+fn links_xml(links: &[u64]) -> String {
+    let list: String = links
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!(r#"<Link Index="{i}" ObjectRef="{l}"/>"#))
+        .collect();
+    format!(r#"<PersistentGroupContainer Version="1"><LinkContainer Version="1"><Links Version="1">{list}</Links></LinkContainer></PersistentGroupContainer>"#)
+}
+
+/// The audio and video clips a master clip uses to play `sequence`.
+fn sequence_sources(w: &mut Writer, sequence: &str, duration: i64) -> (u64, u64) {
+    let aseq = w.obj(
+        "AudioSequenceSource",
+        class::AUDIO_SEQUENCE_SOURCE,
+        7,
+        &format!(r#"<SequenceSource Version="4"><Content Version="10"></Content><Sequence ObjectURef="{sequence}"/></SequenceSource><OriginalDuration>{duration}</OriginalDuration>"#),
+    );
+    let vseq = w.obj(
+        "VideoSequenceSource",
+        class::VIDEO_SEQUENCE_SOURCE,
+        3,
+        &format!(r#"<SequenceSource Version="4"><Content Version="10"></Content><Sequence ObjectURef="{sequence}"/></SequenceSource><OriginalDuration>{duration}</OriginalDuration>"#),
+    );
+    (audio_clip(w, aseq, None, None, true, false), video_clip(w, vseq, None, None, true, false))
+}
+
 /// Creates a merged clip of `video` and every channel of `audio`, synced by timecode.
 /// Camera audio is left out, matching Premiere's "Remove audio from AV clips" option.
 /// With `trim`, the clip only covers the frames where both video and audio exist.
@@ -820,23 +1019,6 @@ pub fn merged_clip(w: &mut Writer, name: &str, video: &VideoSpec, audio: &AudioS
     // One component master clip and one sequence track per production audio channel.
     let mut audio_items = Vec::new();
     for k in 0..n {
-        let chains: Vec<Chain> = (0..n).map(|ch| audio_channel(w, audio, ch, video.time_display)).collect();
-        let clips: Vec<u64> = chains
-            .iter()
-            .map(|c| audio_clip(w, c.source, Some(c.markers), Some((t.audio_in, t.audio_out)), true, true))
-            .collect();
-        let log = logging(
-            w,
-            Logging {
-                clip_name: name,
-                capture_mode: true,
-                media_in: audio.start,
-                media_out: audio.start + audio.duration,
-                rate: audio.sample_tick,
-                format: 200,
-            },
-        );
-        let groups = channel_groups(w, Groups::Only(n, k));
         let props = [
             ("MZ.MergeClipUtils.AudioTrackNumberFromOriginalMergedClip", k.to_string()),
             (
@@ -844,103 +1026,19 @@ pub fn merged_clip(w: &mut Writer, name: &str, video: &VideoSpec, audio: &AudioS
                 format!("{stem} ({})", audio.channel_name(k as usize)),
             ),
         ];
-        let component = master_clip(
-            w,
-            Master {
-                properties: &props,
-                logging: log,
-                audio_chains: n as usize,
-                clips: &clips,
-                groups,
-                name,
-            },
-        );
-        let chain = chains[k as usize];
-        let clip = audio_clip(
-            w,
-            chain.source,
-            Some(chain.markers),
-            Some((t.audio_item_in, t.audio_item_in + t.audio_end - t.audio_start)),
-            false,
-            true,
-        );
-        let sub = sub_clip(w, clip, &component, name, k);
-        let components = default_audio_chain(w);
-        let start = if t.audio_start != 0 {
-            format!("<Start>{}</Start>", t.audio_start)
-        } else {
-            String::new()
-        };
-        let item = w.obj(
-            "AudioClipTrackItem",
-            class::AUDIO_CLIP_TRACK_ITEM,
-            11,
-            &format!(
-                r#"<ClipTrackItem Version="8"><ComponentOwner Version="1"><Components ObjectRef="{components}"/></ComponentOwner><TrackItem Version="4">{start}<End>{}</End></TrackItem><SubClip ObjectRef="{sub}"/></ClipTrackItem><ID>{}</ID><PreRenderComponentChainHashVersion>1</PreRenderComponentChainHashVersion>"#,
-                t.audio_end,
-                new_uid()
-            ),
-        );
-        audio_items.push(item);
+        let component = audio_component(w, name, audio, k, video.time_display, Some((t.audio_in, t.audio_out)), &props);
+        let range = (t.audio_item_in, t.audio_item_in + t.audio_end - t.audio_start);
+        audio_items.push(audio_track_item(w, &component.master, component.chain, name, k, t.audio_start, t.audio_end, range));
     }
 
     // Video component master clip and its track item.
-    let silent = VideoSpec {
-        audio_channels: 0,
-        ..video.clone()
-    };
-    let (vchain, _) = video_media(w, &silent);
-    let vclip = video_clip(w, vchain.source, Some(vchain.markers), Some((t.video_in, t.video_out)), true, true);
-    let vlog = logging(
-        w,
-        Logging {
-            clip_name: name,
-            capture_mode: false,
-            media_in: video.start,
-            media_out: video.start + video.duration,
-            rate: video.frame,
-            format: video.time_display,
-        },
-    );
-    let vgroups = channel_groups(w, Groups::Empty);
     let video_stem = std::path::Path::new(&video.title)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| video.title.clone());
     let vprops = [("MZ.MergeClipUtils.ComponentMasterClipOriginalName", video_stem)];
-    let vcomponent = master_clip(
-        w,
-        Master {
-            properties: &vprops,
-            logging: vlog,
-            audio_chains: 0,
-            clips: &[vclip],
-            groups: vgroups,
-            name,
-        },
-    );
-    let vsub_clip = video_clip(w, vchain.source, Some(vchain.markers), Some((t.video_in, t.video_out)), false, true);
-    let vsub = sub_clip(w, vsub_clip, &vcomponent, name, 0);
-    let vcomponents = w.obj(
-        "VideoComponentChain",
-        class::VIDEO_COMPONENT_CHAIN,
-        3,
-        r#"<DefaultMotion>true</DefaultMotion><DefaultOpacity>true</DefaultOpacity><DefaultMotionComponentID>1</DefaultMotionComponentID><DefaultOpacityComponentID>2</DefaultOpacityComponentID><ComponentChain Version="3"></ComponentChain>"#,
-    );
-    let vstart = if t.video_start != 0 {
-        format!("<Start>{}</Start>", t.video_start)
-    } else {
-        String::new()
-    };
-    let video_item = w.obj(
-        "VideoClipTrackItem",
-        class::VIDEO_CLIP_TRACK_ITEM,
-        8,
-        &format!(
-            r#"<ClipTrackItem Version="8"><ComponentOwner Version="1"><Components ObjectRef="{vcomponents}"/></ComponentOwner><TrackItem Version="4">{vstart}<End>{}</End></TrackItem><SubClip ObjectRef="{vsub}"/></ClipTrackItem><ToneMapSettings>{{"peak":-1,"version":3}}</ToneMapSettings><FrameRect>0,0,{},{}</FrameRect><PixelAspectRatio>1,1</PixelAspectRatio>"#,
-            t.video_end, video.width, video.height
-        ),
-    );
+    let vcomponent = video_component(w, name, video, Some((t.video_in, t.video_out)), &vprops);
+    let video_item = video_track_item(w, &vcomponent.master, vcomponent.chain, name, video, t.video_start, t.video_end, (t.video_in, t.video_out));
 
     // Tracks, link and the hidden merged-clip sequence.
     let video_track = video_clip_track(w, 1, 0, &[video_item]);
@@ -950,49 +1048,27 @@ pub fn merged_clip(w: &mut Writer, name: &str, video: &VideoSpec, audio: &AudioS
         .map(|(i, item)| audio_clip_track(w, 4 + i as u32, i, &[*item], audio.sample_tick))
         .collect();
     let groups = track_groups(w, &[video_track], &audio_tracks, video.frame, audio.sample_tick, video.width, video.height);
-    let link_items: String = audio_items
-        .iter()
-        .chain(std::iter::once(&video_item))
-        .enumerate()
-        .map(|(i, t)| format!(r#"<TrackItem Index="{i}" ObjectRef="{t}"/>"#))
-        .collect();
-    let link = w.obj(
-        "Link",
-        class::LINK,
-        1,
-        &format!(r#"<TrackItemGroup Version="1"><TrackItems Version="1">{link_items}</TrackItems></TrackItemGroup>"#),
-    );
+    let linked: Vec<u64> = audio_items.iter().copied().chain(std::iter::once(video_item)).collect();
+    let link = link(w, &linked);
     let sequence = w.uobj(
         "Sequence",
         class::SEQUENCE,
         12,
         &format!(
-            r#"<Node Version="1"><Properties Version="1"><MZ.EditLine>0</MZ.EditLine><MZ.Sequence.AudioTimeDisplayFormat>200</MZ.Sequence.AudioTimeDisplayFormat><MZ.Sequence.VideoTimeDisplayFormat>{}</MZ.Sequence.VideoTimeDisplayFormat><MZ.WorkInPoint>0</MZ.WorkInPoint><MZ.WorkOutPoint>{}</MZ.WorkOutPoint><MZ.MergedClip.AudioTimecodeBaseTrackNumber>-1</MZ.MergedClip.AudioTimecodeBaseTrackNumber><MZ.Sequence.PreviewFrameSizeWidth>{}</MZ.Sequence.PreviewFrameSizeWidth><MZ.Sequence.PreviewFrameSizeHeight>{}</MZ.Sequence.PreviewFrameSizeHeight><BE.Sequence.IsMergedClip>true</BE.Sequence.IsMergedClip><MZ.ZeroPoint>{}</MZ.ZeroPoint></Properties></Node><PersistentGroupContainer Version="1"><LinkContainer Version="1"><Links Version="1"><Link Index="0" ObjectRef="{link}"/></Links></LinkContainer></PersistentGroupContainer>{}<Name>{}</Name>"#,
+            r#"<Node Version="1"><Properties Version="1"><MZ.EditLine>0</MZ.EditLine><MZ.Sequence.AudioTimeDisplayFormat>200</MZ.Sequence.AudioTimeDisplayFormat><MZ.Sequence.VideoTimeDisplayFormat>{}</MZ.Sequence.VideoTimeDisplayFormat><MZ.WorkInPoint>0</MZ.WorkInPoint><MZ.WorkOutPoint>{}</MZ.WorkOutPoint><MZ.MergedClip.AudioTimecodeBaseTrackNumber>-1</MZ.MergedClip.AudioTimecodeBaseTrackNumber><MZ.Sequence.PreviewFrameSizeWidth>{}</MZ.Sequence.PreviewFrameSizeWidth><MZ.Sequence.PreviewFrameSizeHeight>{}</MZ.Sequence.PreviewFrameSizeHeight><BE.Sequence.IsMergedClip>true</BE.Sequence.IsMergedClip><MZ.ZeroPoint>{}</MZ.ZeroPoint></Properties></Node>{}{}<Name>{}</Name>"#,
             video.time_display,
             t.duration,
             video.width,
             video.height,
             t.zero_point,
+            links_xml(&[link]),
             sequence_track_groups_xml(&groups),
             escape(name)
         ),
     );
 
     // The merged master clip the user sees in the bin.
-    let aseq = w.obj(
-        "AudioSequenceSource",
-        class::AUDIO_SEQUENCE_SOURCE,
-        7,
-        &format!(r#"<SequenceSource Version="4"><Content Version="10"></Content><Sequence ObjectURef="{sequence}"/></SequenceSource><OriginalDuration>{}</OriginalDuration>"#, t.duration),
-    );
-    let vseq = w.obj(
-        "VideoSequenceSource",
-        class::VIDEO_SEQUENCE_SOURCE,
-        3,
-        &format!(r#"<SequenceSource Version="4"><Content Version="10"></Content><Sequence ObjectURef="{sequence}"/></SequenceSource><OriginalDuration>{}</OriginalDuration>"#, t.duration),
-    );
-    let master_audio = audio_clip(w, aseq, None, None, true, false);
-    let master_video = video_clip(w, vseq, None, None, true, false);
+    let (master_audio, master_video) = sequence_sources(w, &sequence, t.duration);
     let log = logging(
         w,
         Logging {
@@ -1021,6 +1097,155 @@ pub fn merged_clip(w: &mut Writer, name: &str, video: &VideoSpec, audio: &AudioS
         },
     );
     clip_project_item(w, name, &master)
+}
+
+/// A synced take to lay into a sequence: its camera angles and production audio, each paired
+/// with the source clip its track items are cut from.
+pub struct SequenceTake<'a> {
+    pub name: &'a str,
+    pub videos: Vec<(&'a VideoSpec, &'a SourceClip)>,
+    pub audio: (&'a AudioSpec, &'a SourceClip),
+}
+
+fn ceil_to(value: i64, step: i64) -> i64 {
+    -floor_to(-value, step)
+}
+
+/// Where a take sits in a sequence: `zero` is the sync-timeline time that lands on the take's
+/// first frame, and the take runs for `length`. Both are whole frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TakeSpan {
+    zero: i64,
+    length: i64,
+}
+
+fn take_span(take: &SequenceTake, frame: i64, trim: bool) -> TakeSpan {
+    let audio = take.audio.0;
+    let spans: Vec<(i64, i64)> = take
+        .videos
+        .iter()
+        .map(|(v, _)| (v.position, v.position + v.duration))
+        .chain(std::iter::once((audio.position, audio.position + audio.duration)))
+        .collect();
+    let lo = spans.iter().map(|s| s.0).max().unwrap_or(0);
+    let hi = spans.iter().map(|s| s.1).min().unwrap_or(0);
+    let (zero, end) = (ceil_to(lo, frame), floor_to(hi, frame));
+    if trim && end > zero {
+        return TakeSpan { zero, length: end - zero };
+    }
+    let zero = floor_to(spans.iter().map(|s| s.0).min().unwrap_or(0), frame);
+    let end = spans.iter().map(|s| s.1).max().unwrap_or(0);
+    TakeSpan {
+        zero,
+        length: ceil_to(end - zero, frame).max(frame),
+    }
+}
+
+/// The part of a source spanning `from..to` on the sync timeline that falls inside `span`, as
+/// whole-frame sequence times `(start, end)` relative to the take, and the source range to play.
+fn place(from: i64, to: i64, span: TakeSpan, frame: i64) -> Option<(i64, i64, (i64, i64))> {
+    let start = ceil_to(from.max(span.zero) - span.zero, frame);
+    let end = floor_to(to.min(span.zero + span.length) - span.zero, frame);
+    if end <= start {
+        return None;
+    }
+    let source_in = span.zero + start - from;
+    Some((start, end, (source_in, source_in + end - start)))
+}
+
+/// Writes a sequence named `name` with `takes` laid end to end: each camera angle on its own
+/// video track and each production audio channel on its own audio track, linked per take.
+/// With `trim`, each take only covers the frames where all of its picture and sound exist.
+/// Returns the sequence's project item UID, or `None` when there's nothing to place.
+///
+/// Leaves out the editing mode and preview settings, like merged clips do. When a project mixes
+/// sequences with and without them, Premiere reworks it on open and dumps every merged clip's
+/// components into a "Recovered Clips" bin.
+pub fn sequence(w: &mut Writer, name: &str, takes: &[SequenceTake], trim: bool) -> Option<String> {
+    let first_video = takes.iter().find_map(|t| t.videos.first().map(|(v, _)| (*v).clone()))?;
+    let frame = first_video.frame;
+    let sample_tick = takes.first()?.audio.0.sample_tick;
+    let video_tracks = takes.iter().map(|t| t.videos.len()).max().unwrap_or(1).max(1);
+    let audio_tracks = takes.iter().map(|t| t.audio.1.audio.len()).max().unwrap_or(1).max(1);
+    let mut video_items: Vec<Vec<u64>> = vec![Vec::new(); video_tracks];
+    let mut audio_items: Vec<Vec<u64>> = vec![Vec::new(); audio_tracks];
+    let mut links = Vec::new();
+    let mut cursor = 0i64;
+    for take in takes {
+        let span = take_span(take, frame, trim);
+        let mut linked = Vec::new();
+        for (track, (v, clip)) in take.videos.iter().enumerate() {
+            let Some(chain) = clip.video else { continue };
+            if let Some((start, end, range)) = place(v.position, v.position + v.duration, span, frame) {
+                let item = video_track_item(w, &clip.master, chain, take.name, v, cursor + start, cursor + end, range);
+                video_items[track].push(item);
+                linked.push(item);
+            }
+        }
+        let (a, clip) = take.audio;
+        if let Some((start, end, range)) = place(a.position, a.position + a.duration, span, frame) {
+            for (k, &chain) in clip.audio.iter().enumerate() {
+                let item_name = format!("{} ({})", take.name, a.channel_name(k));
+                let item = audio_track_item(w, &clip.master, chain, &item_name, k as u32, cursor + start, cursor + end, range);
+                audio_items[k].push(item);
+                linked.push(item);
+            }
+        }
+        if !linked.is_empty() {
+            links.push(link(w, &linked));
+        }
+        cursor += span.length;
+    }
+    if links.is_empty() {
+        return None;
+    }
+
+    let vtracks: Vec<String> = video_items.iter().enumerate().map(|(i, items)| video_clip_track(w, 1 + i as u32, i, items)).collect();
+    let atracks: Vec<String> = audio_items
+        .iter()
+        .enumerate()
+        .map(|(i, items)| audio_clip_track(w, 4 + i as u32, i, items, sample_tick))
+        .collect();
+    let (width, height) = (first_video.width, first_video.height);
+    let groups = track_groups(w, &vtracks, &atracks, frame, sample_tick, width, height);
+    let sequence = w.uobj(
+        "Sequence",
+        class::SEQUENCE,
+        12,
+        &format!(
+            r#"<Node Version="1"><Properties Version="1"><MZ.EditLine>0</MZ.EditLine><MZ.Sequence.AudioTimeDisplayFormat>200</MZ.Sequence.AudioTimeDisplayFormat><MZ.Sequence.VideoTimeDisplayFormat>{td}</MZ.Sequence.VideoTimeDisplayFormat><MZ.WorkInPoint>0</MZ.WorkInPoint><MZ.WorkOutPoint>{cursor}</MZ.WorkOutPoint><MZ.Sequence.PreviewFrameSizeWidth>{width}</MZ.Sequence.PreviewFrameSizeWidth><MZ.Sequence.PreviewFrameSizeHeight>{height}</MZ.Sequence.PreviewFrameSizeHeight><MZ.ZeroPoint>0</MZ.ZeroPoint></Properties></Node>{}{}<Name>{}</Name>"#,
+            links_xml(&links),
+            sequence_track_groups_xml(&groups),
+            escape(name),
+            td = first_video.time_display,
+        ),
+    );
+
+    let (master_audio, master_video) = sequence_sources(w, &sequence, cursor);
+    let log = logging(
+        w,
+        Logging {
+            clip_name: name,
+            capture_mode: false,
+            media_in: 0,
+            media_out: cursor,
+            rate: frame,
+            format: first_video.time_display,
+        },
+    );
+    let groups = channel_groups(w, Groups::All(1));
+    let master = master_clip(
+        w,
+        Master {
+            properties: &[],
+            logging: log,
+            audio_chains: 1,
+            clips: &[master_audio, master_video],
+            groups,
+            name,
+        },
+    );
+    Some(clip_project_item(w, name, &master))
 }
 
 #[cfg(test)]
@@ -1099,16 +1324,143 @@ mod tests {
         merged_clip(&mut w, "2-001", &video, &audio, false);
         let all = w.objects().join("\n");
         assert!(all.contains("&amp; co.WAV"));
-        let ids: std::collections::HashSet<String> = regex::Regex::new(r#"Object(?:U)?ID="([^"]+)""#)
-            .unwrap()
-            .captures_iter(&all)
-            .map(|c| c[1].to_string())
-            .collect();
-        for cap in regex::Regex::new(r#"Object(?:U)?Ref="([^"]+)""#).unwrap().captures_iter(&all) {
-            assert!(ids.contains(&cap[1]), "dangling reference {}", &cap[1]);
-        }
+        assert_references_resolve(&all);
         assert_eq!(all.matches("<MasterClip ObjectUID").count(), 4);
         assert_eq!(all.matches("<AudioClipTrack ObjectUID").count(), 2);
+    }
+
+    fn assert_references_resolve(all: &str) {
+        let ids: std::collections::HashSet<String> = regex::Regex::new(r#"Object(?:U)?ID="([^"]+)""#)
+            .unwrap()
+            .captures_iter(all)
+            .map(|c| c[1].to_string())
+            .collect();
+        for cap in regex::Regex::new(r#"Object(?:U)?Ref="([^"]+)""#).unwrap().captures_iter(all) {
+            assert!(ids.contains(&cap[1]), "dangling reference {}", &cap[1]);
+        }
+    }
+
+    fn video_at(path: &str, frame: i64, frames: i64) -> VideoSpec {
+        VideoSpec {
+            path: path.into(),
+            title: path.rsplit('/').next().unwrap().into(),
+            start: frame * FRAME,
+            position: frame * FRAME,
+            duration: frames * FRAME,
+            frame: FRAME,
+            time_display: 110,
+            width: 3840,
+            height: 2160,
+            audio_channels: 0,
+            sample_tick: 5_292_000,
+        }
+    }
+
+    fn audio_at(path: &str, frame: i64, frames: i64, channels: u32) -> AudioSpec {
+        AudioSpec {
+            path: path.into(),
+            title: path.rsplit('/').next().unwrap().into(),
+            start: frame * FRAME,
+            position: frame * FRAME,
+            duration: frames * FRAME,
+            sample_tick: 5_292_000,
+            channels,
+            channel_names: vec!["MixL".into(), "Boom".into()],
+        }
+    }
+
+    /// Source clips for a take's files, so tests can build `SequenceTake`s that borrow them.
+    struct Shot {
+        name: String,
+        videos: Vec<(VideoSpec, SourceClip)>,
+        audio: (AudioSpec, SourceClip),
+    }
+
+    fn shot(w: &mut Writer, name: &str, videos: Vec<VideoSpec>, audio: AudioSpec) -> Shot {
+        let videos = videos
+            .into_iter()
+            .map(|v| {
+                let clip = video_source_clip(w, &v.title, &v);
+                (v, clip)
+            })
+            .collect();
+        let clip = audio_source_clip(w, &audio.title, &audio, 110);
+        Shot {
+            name: name.into(),
+            videos,
+            audio: (audio, clip),
+        }
+    }
+
+    impl Shot {
+        fn take(&self) -> SequenceTake<'_> {
+            SequenceTake {
+                name: &self.name,
+                videos: self.videos.iter().map(|(v, c)| (v, c)).collect(),
+                audio: (&self.audio.0, &self.audio.1),
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_lays_takes_end_to_end() {
+        let mut w = Writer::new(5000);
+        let t1 = shot(&mut w, "2-001", vec![video_at("/m/A001.mov", 1000, 200)], audio_at("/m/2-001.WAV", 990, 230, 2));
+        let t2 = shot(&mut w, "2-002", vec![video_at("/m/A002.mov", 5000, 100)], audio_at("/m/2-002.WAV", 5000, 100, 2));
+        let before = w.objects().len();
+        sequence(&mut w, "Synced", &[t1.take(), t2.take()], false).unwrap();
+        let seq = w.objects()[before..].join("\n");
+        assert_references_resolve(&w.objects().join("\n"));
+
+        // 2-001's sound rolls 10 frames before picture and runs 230 frames; 2-002 follows it.
+        let item = |start: i64, end: i64| {
+            let start = if start == 0 { String::new() } else { format!("<Start>{}</Start>", start * FRAME) };
+            format!("<TrackItem Version=\"4\">{start}<End>{}</End></TrackItem>", end * FRAME)
+        };
+        assert!(seq.contains(&item(10, 210)));
+        assert!(seq.contains(&item(0, 230)));
+        assert!(seq.contains(&item(230, 330)));
+        assert!(seq.contains(&format!("<MZ.WorkOutPoint>{}</MZ.WorkOutPoint>", 330 * FRAME)));
+        assert!(seq.contains("<Name>2-001 (Boom)</Name>"));
+        assert!(!seq.contains("IsMergedClip"));
+        assert!(!seq.contains("EditingModeGUID"));
+        assert_eq!(seq.matches("<VideoClipTrackItem ").count(), 2);
+        assert_eq!(seq.matches("<AudioClipTrackItem ").count(), 4);
+        assert_eq!(seq.matches("<Link ObjectID").count(), 2);
+        assert_eq!(seq.matches("<ClipProjectItem ").count(), 1);
+        // Items are cut from the source clips, so the only new master is the sequence's own.
+        assert_eq!(seq.matches("<MasterClip ObjectUID").count(), 1);
+        assert!(seq.contains(&format!(r#"<MasterClip ObjectURef="{}"/><Name>2-001</Name>"#, t1.videos[0].1.master)));
+        assert!(seq.contains(&format!(r#"<MasterClip ObjectURef="{}"/><Name>2-002 (Boom)</Name><OrigChGrp>1</OrigChGrp>"#, t2.audio.1.master)));
+    }
+
+    #[test]
+    fn trimmed_sequence_keeps_only_frames_with_picture_and_sound() {
+        let mut w = Writer::new(5000);
+        let t = shot(&mut w, "2-001", vec![video_at("/m/A001.mov", 1000, 200)], audio_at("/m/2-001.WAV", 990, 230, 1));
+        let before = w.objects().len();
+        sequence(&mut w, "Synced", &[t.take()], true).unwrap();
+        let seq = w.objects()[before..].join("\n");
+        assert!(seq.contains(&format!("<End>{}</End>", 200 * FRAME)));
+        assert!(!seq.contains("<Start>"));
+        // The sound starts 10 frames in, so it stays in sync with the picture.
+        assert!(seq.contains(&format!("<InPoint>{}</InPoint><OutPoint>{}</OutPoint>", 10 * FRAME, 210 * FRAME)));
+        assert!(seq.contains(&format!("<MZ.WorkOutPoint>{}</MZ.WorkOutPoint>", 200 * FRAME)));
+    }
+
+    #[test]
+    fn camera_angles_get_their_own_video_tracks() {
+        let mut w = Writer::new(5000);
+        let angles = vec![video_at("/m/A001.mov", 1000, 100), video_at("/m/B001.mov", 1002, 95)];
+        let t = shot(&mut w, "2-001", angles, audio_at("/m/2-001.WAV", 998, 110, 1));
+        let before = w.objects().len();
+        sequence(&mut w, "2-001", &[t.take()], false).unwrap();
+        let seq = w.objects()[before..].join("\n");
+        assert_references_resolve(&w.objects().join("\n"));
+        assert_eq!(seq.matches("<VideoClipTrack ObjectUID").count(), 2);
+        assert_eq!(seq.matches("<AudioClipTrack ObjectUID").count(), 1);
+        assert!(seq.contains(&format!("<Start>{}</Start><End>{}</End>", 2 * FRAME, 102 * FRAME)));
+        assert!(seq.contains(&format!("<Start>{}</Start><End>{}</End>", 4 * FRAME, 99 * FRAME)));
     }
 
     #[test]

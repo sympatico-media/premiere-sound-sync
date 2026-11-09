@@ -1,6 +1,7 @@
-//! Decides names and bins for synced media, then writes them into a Premiere project.
+//! Decides names, bins and sequences for synced media, then writes them into a Premiere
+//! project or an XML timeline.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::media::{MediaFile, MediaKind, Slate};
 use crate::naming;
@@ -10,27 +11,18 @@ use crate::sync::SyncPlan;
 use crate::time::{self, Rate};
 use crate::xmeml;
 
-/// How an XML timeline lays out its synced takes.
-///
-/// A Premiere `.prproj` can only safely hold what Premiere itself writes for "Merge Clips":
-/// there's no public account of the binary fields a hand-authored, visible Sequence or a
-/// multicam clip would need (see the module docs on [`crate::xmeml`]), so `.prproj` output stays
-/// merged-clips-only. XML has no such risk - it's a plain, documented interchange format - so
-/// that's where multi-sequence and multicam-ready layouts live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum XmlPrimary {
+/// How synced takes are laid out as sequences, in a Premiere project or an XML timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Timeline {
+    /// No main sequence, just merged clips (plus any stringouts or shoot-day sequences).
+    None,
     /// Every synced take on one timeline, back to back in shoot order.
+    #[default]
     All,
     /// One sequence per take, with every camera angle on its own video track, already aligned.
     /// Select one in Premiere and choose "Create Multi-Camera Source Sequence" to finish the
     /// multicam clip, or use Resolve / another NLE's own sync tooling on it directly.
     PerTake,
-}
-
-impl Default for XmlPrimary {
-    fn default() -> Self {
-        XmlPrimary::All
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,12 +35,12 @@ pub struct BuildOptions {
     /// Trim merged clips to the range where both video and audio exist.
     pub trim_to_overlap: bool,
     pub import_unsynced: bool,
-    /// How the XML timeline's main layout works. Ignored by `.prproj` output.
-    pub xml_primary: XmlPrimary,
-    /// Also write one extra XML sequence per scene, takes in slate order.
-    pub xml_scene_stringouts: bool,
-    /// Also write one extra XML sequence per shoot day.
-    pub xml_day_sequences: bool,
+    /// The main sequence layout.
+    pub timeline: Timeline,
+    /// Also write one extra sequence per scene, takes in slate order.
+    pub scene_stringouts: bool,
+    /// Also write one extra sequence per shoot day.
+    pub day_sequences: bool,
 }
 
 impl Default for BuildOptions {
@@ -61,9 +53,9 @@ impl Default for BuildOptions {
             multicam: true,
             trim_to_overlap: true,
             import_unsynced: true,
-            xml_primary: XmlPrimary::default(),
-            xml_scene_stringouts: false,
-            xml_day_sequences: false,
+            timeline: Timeline::default(),
+            scene_stringouts: false,
+            day_sequences: false,
         }
     }
 }
@@ -74,10 +66,10 @@ pub struct BuildReport {
     pub multicam_sequences: usize,
     pub plain_clips: usize,
     pub bins_used: usize,
-    /// Number of synced takes written (XML output only; a take can be more than one camera
-    /// angle, when angles were grouped together).
+    /// Number of synced takes laid into sequences (a take can be more than one camera angle,
+    /// when angles were grouped together).
     pub takes: usize,
-    /// Number of `<sequence>` elements written (XML output only).
+    /// Number of sequences written.
     pub sequences: usize,
     pub warnings: Vec<String>,
 }
@@ -206,8 +198,9 @@ fn report_for(items: &[PlannedItem], warnings: Vec<String>) -> BuildReport {
     }
 }
 
-/// Adds merged clips and unsynced clips to `project` under `target_bin`.
-pub fn build(files: &[MediaFile], plan: &SyncPlan, project: &mut Project, target_bin: &str, opts: &BuildOptions) -> BuildReport {
+/// Adds merged clips, unsynced clips and the sequences `opts` asks for to `project` under
+/// `target_bin`. The main synced timeline is called `timeline_name`.
+pub fn build(files: &[MediaFile], plan: &SyncPlan, project: &mut Project, target_bin: &str, timeline_name: &str, opts: &BuildOptions) -> BuildReport {
     let (items, warnings) = layout(files, plan, opts);
     let mut bins: HashMap<Vec<String>, String> = HashMap::new();
     for item in &items {
@@ -244,7 +237,60 @@ pub fn build(files: &[MediaFile], plan: &SyncPlan, project: &mut Project, target
         };
         project.add_to_bin(&parent, &uid);
     }
-    report_for(&items, warnings)
+    let mut report = report_for(&items, warnings);
+
+    let (groups, _) = group_takes(files, plan, opts);
+    let sequences = plan_sequences(&groups, opts, timeline_name);
+
+    // Sequences cut from one visible clip per source file, like Premiere's own XML import.
+    let mut videos: BTreeMap<usize, (VideoSpec, objects::SourceClip)> = BTreeMap::new();
+    let mut audios: BTreeMap<usize, (AudioSpec, objects::SourceClip)> = BTreeMap::new();
+    for g in sequences.iter().flat_map(|s| &s.takes).map(|&i| &groups[i]) {
+        for &v in &g.videos {
+            if !videos.contains_key(&v) {
+                let spec = video_spec(&files[v], true, plan.positions[v].unwrap_or(0));
+                let clip = objects::video_source_clip(project.writer(), &spec.title, &spec);
+                videos.insert(v, (spec, clip));
+            }
+        }
+        if !audios.contains_key(&g.audio) {
+            let spec = audio_spec(&files[g.audio], plan.positions[g.audio].unwrap_or(0));
+            let clip = objects::audio_source_clip(project.writer(), &spec.title, &spec, DEFAULT_RATE.premiere_time_display(false));
+            audios.insert(g.audio, (spec, clip));
+        }
+    }
+    if !videos.is_empty() || !audios.is_empty() {
+        let bin = project.ensure_bin(target_bin, "Source Media");
+        let items: Vec<String> = videos.values().map(|(_, c)| c.item.clone()).chain(audios.values().map(|(_, c)| c.item.clone())).collect();
+        for item in items {
+            project.add_to_bin(&bin, &item);
+        }
+    }
+
+    for seq in sequences {
+        let takes: Vec<objects::SequenceTake> = seq
+            .takes
+            .iter()
+            .map(|&i| {
+                let g = &groups[i];
+                let (spec, clip) = &audios[&g.audio];
+                objects::SequenceTake {
+                    name: &g.name,
+                    videos: g.videos.iter().map(|v| (&videos[v].0, &videos[v].1)).collect(),
+                    audio: (spec, clip),
+                }
+            })
+            .collect();
+        let Some(uid) = objects::sequence(project.writer(), &seq.name, &takes, opts.trim_to_overlap) else { continue };
+        let bin = match seq.bin {
+            Some(name) => project.ensure_bin(target_bin, name),
+            None => target_bin.to_string(),
+        };
+        project.add_to_bin(&bin, &uid);
+        report.sequences += 1;
+    }
+    report.takes = groups.len();
+    report
 }
 
 /// One take: the camera angle(s) that share a production audio recording. Angles come from
@@ -275,7 +321,7 @@ fn group_takes(files: &[MediaFile], plan: &SyncPlan, opts: &BuildOptions) -> (Ve
             group_of.insert(v, gi);
         }
     }
-    let mut by_group: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    let mut by_group: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut solo: Vec<usize> = Vec::new();
     for pair in &plan.merged {
         match group_of.get(&pair.video) {
@@ -308,13 +354,60 @@ fn group_takes(files: &[MediaFile], plan: &SyncPlan, opts: &BuildOptions) -> (Ve
     (takes, warnings)
 }
 
-fn report_for_xml(sequences: usize, takes: usize, warnings: Vec<String>) -> BuildReport {
-    BuildReport {
-        takes,
-        sequences,
-        warnings,
-        ..Default::default()
+/// One sequence to write: its name, its takes (indices into the grouped takes) in order, and
+/// the bin it goes in below the target bin in a Premiere project (`None` for the target itself).
+struct PlannedSequence {
+    name: String,
+    takes: Vec<usize>,
+    bin: Option<&'static str>,
+}
+
+fn plan_sequences(groups: &[TakeGroup], opts: &BuildOptions, timeline_name: &str) -> Vec<PlannedSequence> {
+    let mut sequences = Vec::new();
+    if groups.is_empty() {
+        return sequences;
     }
+    match opts.timeline {
+        Timeline::None => {}
+        Timeline::All => sequences.push(PlannedSequence {
+            name: timeline_name.to_string(),
+            takes: (0..groups.len()).collect(),
+            bin: None,
+        }),
+        Timeline::PerTake => {
+            for (i, g) in groups.iter().enumerate() {
+                sequences.push(PlannedSequence {
+                    name: g.name.clone(),
+                    takes: vec![i],
+                    bin: Some("Takes"),
+                });
+            }
+        }
+    }
+    if opts.scene_stringouts {
+        let mut by_scene: BTreeMap<Option<String>, Vec<usize>> = BTreeMap::new();
+        for (i, g) in groups.iter().enumerate() {
+            by_scene.entry(g.scene.clone()).or_default().push(i);
+        }
+        for (scene, takes) in by_scene {
+            let name = match scene {
+                Some(s) => format!("Scene {s} Stringout"),
+                None => "No Scene Stringout".to_string(),
+            };
+            sequences.push(PlannedSequence { name, takes, bin: Some("Stringouts") });
+        }
+    }
+    if opts.day_sequences {
+        let mut by_day: BTreeMap<Option<String>, Vec<usize>> = BTreeMap::new();
+        for (i, g) in groups.iter().enumerate() {
+            by_day.entry(g.day.clone()).or_default().push(i);
+        }
+        for (day, takes) in by_day {
+            let name = day.unwrap_or_else(|| "Unknown Day".to_string());
+            sequences.push(PlannedSequence { name, takes, bin: Some("Shoot Days") });
+        }
+    }
+    sequences
 }
 
 /// Writes a Final Cut Pro 7 XML project of one or more synced-take sequences, for Premiere Pro
@@ -331,40 +424,13 @@ pub fn build_xml(files: &[MediaFile], plan: &SyncPlan, doc_name: &str, opts: &Bu
             audio_position: plan.positions[g.audio].unwrap_or(0),
         })
         .collect();
-
-    let mut sequences: Vec<(String, Vec<usize>)> = Vec::new();
-    match opts.xml_primary {
-        XmlPrimary::All => sequences.push((doc_name.to_string(), (0..groups.len()).collect())),
-        XmlPrimary::PerTake => {
-            for (i, g) in groups.iter().enumerate() {
-                sequences.push((g.name.clone(), vec![i]));
-            }
-        }
-    }
-    if opts.xml_scene_stringouts {
-        let mut by_scene: std::collections::BTreeMap<Option<String>, Vec<usize>> = std::collections::BTreeMap::new();
-        for (i, g) in groups.iter().enumerate() {
-            by_scene.entry(g.scene.clone()).or_default().push(i);
-        }
-        for (scene, idxs) in by_scene {
-            let name = match scene {
-                Some(s) => format!("Scene {s} Stringout"),
-                None => "No Scene Stringout".to_string(),
-            };
-            sequences.push((name, idxs));
-        }
-    }
-    if opts.xml_day_sequences {
-        let mut by_day: std::collections::BTreeMap<Option<String>, Vec<usize>> = std::collections::BTreeMap::new();
-        for (i, g) in groups.iter().enumerate() {
-            by_day.entry(g.day.clone()).or_default().push(i);
-        }
-        for (day, idxs) in by_day {
-            let name = day.unwrap_or_else(|| "Unknown Day".to_string());
-            sequences.push((name, idxs));
-        }
-    }
-
+    let sequences: Vec<(String, Vec<usize>)> = plan_sequences(&groups, opts, doc_name).into_iter().map(|s| (s.name, s.takes)).collect();
     let xml = xmeml::export(&takes, &sequences, opts.trim_to_overlap);
-    (xml, report_for_xml(sequences.len(), takes.len(), warnings))
+    let report = BuildReport {
+        takes: takes.len(),
+        sequences: sequences.len(),
+        warnings,
+        ..Default::default()
+    };
+    (xml, report)
 }

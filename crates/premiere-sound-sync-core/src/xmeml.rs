@@ -1,9 +1,6 @@
 //! Final Cut Pro 7 XML (`xmeml`) export, the interchange format Premiere and Resolve both import.
 //!
-//! Unlike `.prproj`, this is a plain, long-documented text format: there's no binary object
-//! graph to guess at, so it's where every clip-layout idea lives, including ones (like
-//! multicam-ready per-take sequences) that would be too risky to hand-author as Premiere's own
-//! project format. A document holds one or more `<sequence>`s, each a run of takes laid end to
+//! A document holds one or more `<sequence>`s, each a run of takes laid end to
 //! end: every camera angle on its own video track, each production audio channel on its own
 //! audio track. Source files are listed once as master clips. Times are whole frames at the
 //! timeline rate, so audio is placed to the nearest frame.

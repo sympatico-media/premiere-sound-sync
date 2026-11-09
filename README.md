@@ -12,18 +12,17 @@ Synced clips show up in Premiere named from the slate, grouped into a bin per sc
 
 ## What it writes
 
-- **New project.** A `.prproj` with merged clips in a `Synced` bin.
-- **Existing project.** The same merged clips added to a bin you choose.
+- **New project.** A `.prproj` with merged clips and sequences in a `Synced` bin.
+- **Existing project.** The same clips and sequences added to a bin you choose.
 - **XML timeline.** An interchange timeline (`.xml`, FCP7/`xmeml`) for Premiere Pro or DaVinci Resolve.
 
-A **merged clip** is Premiere's own clip type that combines one camera angle with its matched production audio. `.prproj` output only ever writes merged clips: it's the one Premiere clip type this project can produce with confidence, because the internal layout of a hand-authored Sequence or multicam clip isn't documented anywhere, even by other projects that reverse-engineer `.prproj` with real copies of Premiere to check their work against. Forging one risked writing a project that opens looking fine and corrupts partway through editing.
+A **merged clip** is Premiere's own clip type that combines one camera angle with its matched production audio. Sequences are laid out as:
 
-Multi-angle takes and ready-to-use sequences are written to the XML timeline instead, which is a plain, fully documented interchange format with no such risk. An XML destination can be laid out as:
-
+- **Merged clips only** – no timeline, just the clips in their bins (Premiere projects only).
 - **One synced timeline** – every take back to back in shoot order, for reviewing sync.
 - **One sequence per take** – each take's camera angles and audio in their own small sequence, already aligned. Select one in Premiere and use **Create Multi-Camera Source Sequence** to finish the multicam clip.
 
-Either one can be combined with extra sequences: **scene stringouts** (one sequence per scene, takes in slate order) and/or **a sequence per shoot day** (grouped by the date the camera or recorder actually wrote down, falling back to the file's filesystem modification time if neither device recorded one).
+Either one can be combined with extra sequences: **scene stringouts** (one sequence per scene, takes in slate order) and/or **a sequence per shoot day** (grouped by the date the camera or recorder actually wrote down, falling back to the file's filesystem modification time if neither device recorded one). In a `.prproj`, sequences cut from the source files in a `Source Media` bin.
 
 Clips are trimmed to the stretch where picture and sound both exist. Files that never match can still be imported as plain clips (`.prproj` only; an XML timeline only contains synced takes).
 
@@ -87,13 +86,13 @@ cargo run -p premiere-sound-sync-core --example sync -- episode.prproj --into ex
 cargo run -p premiere-sound-sync-core --example sync -- timeline.xml /path/to/shoot
 ```
 
-An `.xml` destination takes a few extra flags, all optional:
+Sequence flags work with either destination, all optional:
 
 ```sh
-cargo run -p premiere-sound-sync-core --example sync -- timeline.xml \
-  --xml-primary per-take \        # all (default) | per-take
-  --xml-scene-stringouts \
-  --xml-day-sequences \
+cargo run -p premiere-sound-sync-core --example sync -- episode.prproj \
+  --timeline per-take \        # none | all (default) | per-take
+  --scene-stringouts \
+  --day-sequences \
   /path/to/shoot
 ```
 

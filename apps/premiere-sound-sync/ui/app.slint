@@ -191,10 +191,10 @@ export component AppWindow inherits Window {
     in-out property <bool> import-unsynced: true;
     in-out property <bool> trim: true;
 
-    // XML timeline layout. 0 = one synced timeline, 1 = one sequence per take.
-    in-out property <int> xml-primary: 0;
-    in-out property <bool> xml-scene-stringouts: false;
-    in-out property <bool> xml-day-sequences: false;
+    // Sequence layout. 0 = one synced timeline, 1 = one sequence per take.
+    in-out property <int> timeline: 0;
+    in-out property <bool> scene-stringouts: false;
+    in-out property <bool> day-sequences: false;
 
     // 0 new project, 1 existing project, 2 XML timeline
     in-out property <int> dest-mode: 0;
@@ -448,7 +448,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     GroupBox {
-                        title: root.dest-mode == 2 ? "OUTPUT" : "ORGANIZE";
+                        title: "ORGANIZE";
                         horizontal-stretch: 1;
                         VerticalLayout {
                             spacing: 8px;
@@ -502,53 +502,52 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                             preferred-width: 0px;
                         }
-                        if root.dest-mode == 2: VerticalLayout {
+                    }
+                    GroupBox {
+                        title: "SEQUENCES";
+                        horizontal-stretch: 1;
+                        VerticalLayout {
                             spacing: 2px;
+                            if root.dest-mode != 2: OptionRow {
+                                text: "Merged clips only";
+                                hint: "Clips in bins, no timeline.";
+                                selected: root.timeline == 0;
+                                clicked => {
+                                    root.timeline = 0;
+                                    root.options-changed();
+                                }
+                            }
                             OptionRow {
                                 text: "One synced timeline";
-                                hint: "Every synced take back to back in shoot order. Good for reviewing sync.";
-                                selected: root.xml-primary == 0;
+                                hint: "Every take in shoot order.";
+                                selected: root.timeline == 1 || (root.timeline == 0 && root.dest-mode == 2);
                                 clicked => {
-                                    root.xml-primary = 0;
+                                    root.timeline = 1;
                                     root.options-changed();
                                 }
                             }
                             OptionRow {
                                 text: "One sequence per take";
-                                hint: "Each take's camera angles and production audio in their own small sequence, already aligned. Select one in Premiere and choose \"Create Multi-Camera Source Sequence\" to finish the multicam clip.";
-                                selected: root.xml-primary == 1;
+                                hint: "Angles and sound stacked, multicam-ready.";
+                                selected: root.timeline == 2;
                                 clicked => {
-                                    root.xml-primary = 1;
+                                    root.timeline = 2;
                                     root.options-changed();
                                 }
                             }
-                            CheckBox {
-                                text: "Also add scene stringouts";
-                                checked <=> root.xml-scene-stringouts;
-                                toggled => {
-                                    root.options-changed();
-                                }
+                        }
+                        CheckBox {
+                            text: "Scene stringouts";
+                            checked <=> root.scene-stringouts;
+                            toggled => {
+                                root.options-changed();
                             }
-                            Label {
-                                text: "One extra sequence per scene, with that scene's takes in slate order.";
-                                color: Theme.text-tertiary;
-                                font-size: Theme.font-size-small;
-                                wrap: word-wrap;
-                                preferred-width: 0px;
-                            }
-                            CheckBox {
-                                text: "Also add a sequence per shoot day";
-                                checked <=> root.xml-day-sequences;
-                                toggled => {
-                                    root.options-changed();
-                                }
-                            }
-                            Label {
-                                text: "One extra sequence for each day media was recorded on.";
-                                color: Theme.text-tertiary;
-                                font-size: Theme.font-size-small;
-                                wrap: word-wrap;
-                                preferred-width: 0px;
+                        }
+                        CheckBox {
+                            text: "A sequence per shoot day";
+                            checked <=> root.day-sequences;
+                            toggled => {
+                                root.options-changed();
                             }
                         }
                     }

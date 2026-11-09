@@ -11,7 +11,7 @@ use std::time::Duration;
 use premiere_sound_sync_core::time::{Rate, TICKS_PER_SECOND};
 use premiere_sound_sync_core::{
     build, build_xml, naming, plan, probe, scan, waveform, BinInfo, BuildOptions, MediaFile, MediaKind, Project, SyncMethod, SyncOptions, SyncPlan,
-    XmlPrimary,
+    Timeline,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use studio_ui::{dialogs, FileDrop};
@@ -705,9 +705,13 @@ fn start_build(ui: &AppWindow) {
         multicam: ui.get_multicam(),
         trim_to_overlap: ui.get_trim(),
         import_unsynced: ui.get_import_unsynced(),
-        xml_primary: if ui.get_xml_primary() == 1 { XmlPrimary::PerTake } else { XmlPrimary::All },
-        xml_scene_stringouts: ui.get_xml_scene_stringouts(),
-        xml_day_sequences: ui.get_xml_day_sequences(),
+        timeline: match ui.get_timeline() {
+            2 => Timeline::PerTake,
+            0 if mode != 2 => Timeline::None,
+            _ => Timeline::All,
+        },
+        scene_stringouts: ui.get_scene_stringouts(),
+        day_sequences: ui.get_day_sequences(),
     };
     let existing = if mode == 1 { with_state(|s| s.existing.clone()) } else { None };
     let bin_index = ui.get_bin_index();
@@ -720,8 +724,8 @@ fn start_build(ui: &AppWindow) {
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let result = (|| -> anyhow::Result<premiere_sound_sync_core::BuildReport> {
+            let name = output.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             if mode == 2 {
-                let name = output.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let (xml, report) = build_xml(&files, &sync_plan, &name, &opts);
                 std::fs::write(&output, xml)?;
                 return Ok(report);
@@ -731,12 +735,16 @@ fn start_build(ui: &AppWindow) {
                 None => Project::new_blank()?,
             };
             let root = project.root().to_string();
-            let target = match (&existing, bin_index) {
-                (None, _) | (Some(_), 0) => root,
-                (Some(_), 1) => project.ensure_bin(&root, if new_bin.is_empty() { "Synced" } else { &new_bin }),
-                (Some((_, bins)), i) => bins.get(i as usize - 2).map(|b| b.uid.clone()).unwrap_or(root),
+            let new_bin = if new_bin.is_empty() { "Synced".to_string() } else { new_bin };
+            let (target, timeline_name) = match (&existing, bin_index) {
+                (None, _) | (Some(_), 0) => (root, name),
+                (Some(_), 1) => (project.ensure_bin(&root, &new_bin), new_bin),
+                (Some((_, bins)), i) => match bins.get(i as usize - 2) {
+                    Some(b) => (b.uid.clone(), b.name.clone()),
+                    None => (root, name),
+                },
             };
-            let report = build(&files, &sync_plan, &mut project, &target, &opts);
+            let report = build(&files, &sync_plan, &mut project, &target, &timeline_name, &opts);
             project.save(&output)?;
             Ok(report)
         })();
@@ -746,12 +754,18 @@ fn start_build(ui: &AppWindow) {
                 Ok(report) => {
                     with_state(|s| s.last_output = Some(output.clone()));
                     ui.set_can_reveal(true);
+                    let sequences = match report.sequences {
+                        1 => "1 sequence".to_string(),
+                        n => format!("{n} sequences"),
+                    };
                     let mut parts = if mode == 2 {
-                        let seq = if report.sequences == 1 { "sequence".to_string() } else { format!("{} sequences", report.sequences) };
-                        vec![format!("{} synced takes, {seq}", report.takes)]
+                        vec![format!("{} synced takes", report.takes)]
                     } else {
                         vec![format!("{} merged clips", report.merged_clips)]
                     };
+                    if report.sequences > 0 {
+                        parts.push(sequences);
+                    }
                     if report.plain_clips > 0 {
                         parts.push(format!("{} unsynced clips", report.plain_clips));
                     }
