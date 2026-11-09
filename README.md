@@ -4,6 +4,12 @@ Premiere Sync pairs production audio with camera video by timecode and builds a 
 
 Clip names inside Premiere can come from slate metadata. Files on disk keep their original names.
 
+![Premiere Sync, matching a shoot folder by timecode](docs/premiere-sync.png)
+
+Synced clips show up in Premiere named from the slate, grouped into a bin per scene.
+
+![Scene 2 in Premiere, with merged clips named from the slate](docs/premiere-bin.png)
+
 ## What it writes
 
 - **New project.** A `.prproj` with synced clips in a `Synced` bin.
