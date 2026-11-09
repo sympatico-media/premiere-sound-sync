@@ -10,6 +10,7 @@ premiere-sound-sync-core = { path = "../../crates/premiere-sound-sync-core" }
 studio-ui = { path = "../../crates/studio-ui" }
 slint.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true

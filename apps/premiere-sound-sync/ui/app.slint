@@ -205,6 +205,9 @@ export component AppWindow inherits Window {
     in property <bool> building;
     in property <bool> can-build;
     in property <bool> can-reveal;
+    // Set when GitHub has a newer release than this build.
+    in property <string> update-version;
+    in property <string> update-url;
 
     callback add-sources();
     callback remove-source(int);
@@ -216,6 +219,7 @@ export component AppWindow inherits Window {
     callback change-output();
     callback build();
     callback reveal();
+    callback open-update();
 
     HorizontalLayout {
         spacing: 0;
@@ -379,13 +383,6 @@ export component AppWindow inherits Window {
                                     root.options-changed();
                                 }
                             }
-                            Label {
-                                text: "Waveform matches clips by sound instead of embedded timecode. Slower, but works on footage with none.";
-                                color: Theme.text-tertiary;
-                                font-size: Theme.font-size-small;
-                                wrap: word-wrap;
-                                preferred-width: 0px;
-                            }
                         }
                     }
                     GroupBox {
@@ -433,7 +430,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Label {
-                            text: "Only the clip names inside Premiere change. Your files on disk keep their original names.";
+                            text: "Renames clips inside Premiere. Your files on disk stay exactly as they are.";
                             color: Theme.text-tertiary;
                             font-size: Theme.font-size-small;
                             wrap: word-wrap;
@@ -489,7 +486,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.dest-mode != 2: Label {
-                            text: "Clips are merged: Premiere's single clip combining picture and its matched production audio. Quick to use, but Premiere can't split a merged clip back into its sources, and sound editors lose the audio metadata. For multicam or per-take sequences, export an XML Timeline instead.";
+                            text: "Each take becomes a merged clip with its picture and production audio together, ready to cut.";
                             color: Theme.text-tertiary;
                             font-size: Theme.font-size-small;
                             wrap: word-wrap;
@@ -566,6 +563,15 @@ export component AppWindow inherits Window {
                         width: 18px;
                         height: 18px;
                         indeterminate: true;
+                    }
+                    if root.update-version != "": VerticalLayout {
+                        alignment: center;
+                        LinkButton {
+                            text: "Version \{root.update-version} available";
+                            clicked => {
+                                root.open-update();
+                            }
+                        }
                     }
                     if root.can-reveal: VerticalLayout {
                         alignment: center;

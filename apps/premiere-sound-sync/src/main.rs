@@ -16,6 +16,8 @@ use premiere_sound_sync_core::{
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use studio_ui::{dialogs, FileDrop};
 
+mod update;
+
 slint::include_modules!();
 
 #[derive(Default)]
@@ -191,6 +193,23 @@ fn main() -> anyhow::Result<()> {
             studio_ui::reveal_in_file_manager(&path);
         }
     });
+
+    ui.on_open_update({
+        let weak = ui.as_weak();
+        move || studio_ui::open_url(&weak.unwrap().get_update_url())
+    });
+
+    {
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            if let Some(release) = update::check() {
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_update_version(release.version.into());
+                    ui.set_update_url(release.url.into());
+                });
+            }
+        });
+    }
 
     refresh_media(&ui);
     let initial: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).filter(|p| p.exists()).collect();

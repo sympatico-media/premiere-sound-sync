@@ -175,13 +175,6 @@ pub fn layout(files: &[MediaFile], plan: &SyncPlan, opts: &BuildOptions) -> (Vec
         });
     }
 
-    if opts.multicam && !plan.multicam.is_empty() {
-        warnings.push(format!(
-            "{} multicam group(s) detected. Angles were added as merged clips; multicam source sequences are not generated yet.",
-            plan.multicam.len()
-        ));
-    }
-
     if opts.import_unsynced {
         for &i in &plan.unsynced {
             let f = &files[i];
