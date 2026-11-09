@@ -3494,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "premiere-sound-sync"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "premiere-sound-sync-core",
@@ -3506,7 +3506,7 @@ dependencies = [
 
 [[package]]
 name = "premiere-sound-sync-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "flate2",
@@ -4335,7 +4335,7 @@ dependencies = [
 
 [[package]]
 name = "studio-ui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

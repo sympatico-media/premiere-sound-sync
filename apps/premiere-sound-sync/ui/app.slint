@@ -84,9 +84,15 @@ component Column inherits Label {
 component MediaRowView inherits Rectangle {
     in property <MediaRow> entry;
     in property <bool> alternate;
+    callback clicked();
     height: 30px;
     background: hover.has-hover ? Theme.row-hover : root.alternate ? #ffffff04 : transparent;
-    hover := TouchArea { }
+    hover := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
     HorizontalLayout {
         padding-left: 16px;
         padding-right: 16px;
@@ -219,6 +225,7 @@ export component AppWindow inherits Window {
     callback change-output();
     callback build();
     callback reveal();
+    callback reveal-media(int);
     callback open-update();
 
     HorizontalLayout {
@@ -335,6 +342,9 @@ export component AppWindow inherits Window {
                     for row[i] in root.media: MediaRowView {
                         entry: row;
                         alternate: mod(i, 2) == 1;
+                        clicked => {
+                            root.reveal-media(i);
+                        }
                     }
                 }
                 if root.media.length == 0: Rectangle {

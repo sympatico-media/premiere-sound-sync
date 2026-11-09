@@ -194,6 +194,20 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    ui.on_reveal_media(|index| {
+        let path = with_state(|s| {
+            let index = index as usize;
+            if index < s.files.len() {
+                Some(s.files[index].path.clone())
+            } else {
+                s.failures.get(index - s.files.len()).map(|(path, _)| path.clone())
+            }
+        });
+        if let Some(path) = path {
+            studio_ui::reveal_in_file_manager(&path);
+        }
+    });
+
     ui.on_open_update({
         let weak = ui.as_weak();
         move || studio_ui::open_url(&weak.unwrap().get_update_url())
